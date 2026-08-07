@@ -61,6 +61,7 @@ opencepgeo build \
   --ibge data/locked/ibge-localidades-2022-gpkg.zip \
   --source-lock sources/lock.json \
   --config config/enrichment-v1.json \
+  --quality-config config/quality-v1.json \
   --output out/opencepgeo.sqlite
 
 opencepgeo lookup --database out/opencepgeo.sqlite 01001000
@@ -107,6 +108,10 @@ GeoJSON coordinate order is longitude, latitude.
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
+
+Production artifacts are also checked against versioned geographic,
+count/coverage, consistency, and holdout error thresholds. See the
+[quality calibration contract](docs/quality.md).
 
 See [ADR 0001](docs/adr/0001-offline-centroid-pipeline.md) for the design and
 trade-offs. Downstream bulk consumers should follow the

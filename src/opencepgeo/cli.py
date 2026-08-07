@@ -7,6 +7,11 @@ from pathlib import Path
 
 from .database import build_database, lookup
 from .osm import PBFError, extract_postcode_nodes
+from .quality import (
+    build_quality_report,
+    quality_report_markdown,
+    write_quality_report,
+)
 from .source_lock import SourceLockError, fetch_sources, verify_sources
 
 
@@ -28,6 +33,11 @@ def _parser() -> argparse.ArgumentParser:
         "--config",
         default="config/enrichment-v1.json",
         help="versioned enrichment thresholds",
+    )
+    build.add_argument(
+        "--quality-config",
+        default="config/quality-v1.json",
+        help="versioned build regression thresholds",
     )
     source_metadata = build.add_mutually_exclusive_group(required=True)
     source_metadata.add_argument("--source-lock", help="checksum-locked input manifest")
@@ -64,6 +74,18 @@ def _parser() -> argparse.ArgumentParser:
     osm_extract.add_argument("--output", required=True)
     osm_extract.add_argument("--manifest")
     osm_extract.add_argument("--force", action="store_true")
+
+    quality = commands.add_parser("quality", help="run validation quality gates")
+    quality_commands = quality.add_subparsers(dest="quality_command", required=True)
+    quality_report = quality_commands.add_parser("report")
+    quality_report.add_argument("--database", required=True)
+    quality_report.add_argument("--ibge", required=True)
+    quality_report.add_argument("--osm-observations", required=True)
+    quality_report.add_argument("--official-holdout", required=True)
+    quality_report.add_argument("--config", default="config/enrichment-v1.json")
+    quality_report.add_argument("--quality-config", default="config/quality-v1.json")
+    quality_report.add_argument("--output", required=True)
+    quality_report.add_argument("--markdown")
     return parser
 
 
@@ -107,6 +129,32 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, sort_keys=True))
         return 0
 
+    if args.command == "quality":
+        try:
+            report = build_quality_report(
+                database_path=args.database,
+                ibge_path=args.ibge,
+                osm_observations_path=args.osm_observations,
+                official_holdout_path=args.official_holdout,
+                enrichment_config_path=args.config,
+                quality_policy_path=args.quality_config,
+            )
+            write_quality_report(report, args.output)
+            if args.markdown:
+                Path(args.markdown).write_text(
+                    quality_report_markdown(report), encoding="utf-8"
+                )
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {"status": report["status"], "failures": report["failures"]},
+                sort_keys=True,
+            )
+        )
+        return 0 if report["status"] == "pass" else 2
+
     if args.command == "build":
         output = Path(args.output)
         stats = build_database(
@@ -115,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             observations_path=args.observations,
             osm_observations_path=args.osm_observations,
             enrichment_config_path=args.config,
+            quality_config_path=args.quality_config,
             source_version=args.source_version,
             source_lock_path=args.source_lock,
             output_path=output,

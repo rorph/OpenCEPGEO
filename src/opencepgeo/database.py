@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import EnrichmentConfig, load_enrichment_config
 from .estimator import CentroidEstimator, normalize_cep, normalize_ibge
+from .quality import enforce_build_quality, load_quality_policy
 from .source_lock import LockedSource, SourceLock, load_source_lock, verify_file
 from .sources import (
     iter_opencep_records,
@@ -334,6 +335,7 @@ def build_database(
     observations_path: str | Path | None = None,
     osm_observations_path: str | Path | None = None,
     enrichment_config_path: str | Path | None = None,
+    quality_config_path: str | Path | None = None,
     export_path: str | Path | None = None,
     manifest_path: str | Path | None = None,
     min_prefix_samples: int = 3,
@@ -379,6 +381,17 @@ def build_database(
             outlier_floor_km=0.25,
         )
         enrichment_record = None
+
+    if quality_config_path is not None:
+        quality_policy = load_quality_policy(quality_config_path)
+        quality_record: dict[str, object] | None = {
+            "filename": quality_policy.path.name,
+            "sha256": quality_policy.sha256,
+            "version": quality_policy.version,
+        }
+    else:
+        quality_policy = None
+        quality_record = None
 
     municipalities = load_ibge_municipality_references(ibge_path)
     observations = load_observations(observations_path)
@@ -467,6 +480,9 @@ def build_database(
         ):
             statistics[f"tier_{precision}"] = tier_counts.get(precision, 0)
 
+        if quality_policy is not None:
+            enforce_build_quality(connection, quality_policy)
+
         export_record = None
         if temporary_export is not None and export is not None:
             export_bytes, export_sha256 = _write_normalized_export(
@@ -500,6 +516,14 @@ def build_database(
                 "INSERT INTO metadata (key, value) VALUES (?, ?)",
                 ("enrichment_config_sha256", str(enrichment_record["sha256"])),
             )
+        if quality_record is not None:
+            connection.executemany(
+                "INSERT INTO metadata (key, value) VALUES (?, ?)",
+                (
+                    ("quality_config_sha256", str(quality_record["sha256"])),
+                    ("quality_version", str(quality_record["version"])),
+                ),
+            )
         connection.commit()
         connection.execute("VACUUM")
         connection.close()
@@ -514,6 +538,7 @@ def build_database(
                 "dataset_version": dataset_version,
                 "configuration": {
                     "enrichment": enrichment_record or enrichment.as_dict(),
+                    "quality": quality_record,
                     "observations": observations_record,
                     "osm_observations": osm_observations_record,
                     "opencep_corrections": corrections_record,

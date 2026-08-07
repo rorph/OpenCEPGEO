@@ -1,0 +1,43 @@
+{
+  "format": "opencepgeo-quality-policy-v1",
+  "version": "quality-2026.2.1",
+  "brazil_bounds": {
+    "latitude_min": -34.0,
+    "latitude_max": 5.5,
+    "longitude_min": -74.0,
+    "longitude_max": -28.0
+  },
+  "build_thresholds": {
+    "minimum_records": 1200000,
+    "minimum_coverage": 0.99999,
+    "maximum_unresolved": 10,
+    "minimum_ufs": 27,
+    "maximum_invalid_bounds": 0,
+    "maximum_uf_ibge_mismatches": 0,
+    "maximum_municipality_conflicts": 0,
+    "allowed_precision_tiers": [
+      "observed_cep",
+      "osm_postcode",
+      "observed_cep_prefix",
+      "municipality"
+    ]
+  },
+  "holdout": {
+    "algorithm": "sha256-modulus-v1",
+    "modulus": 5,
+    "remainder": 0,
+    "minimum_records": 80000,
+    "minimum_official_records": 35,
+    "minimum_ufs": 27,
+    "required_address_classes": [
+      "urban_address_proxy",
+      "rural_or_general_address_proxy"
+    ]
+  },
+  "error_thresholds_km": {
+    "overall_p95": 10.0,
+    "official_overall_p95": 20.0,
+    "osm_postcode_p95": 2.0,
+    "municipality_p95": 50.0
+  }
+}
