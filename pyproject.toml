@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencepgeo"
+version = "0.1.0"
+description = "Build an offline Brazilian CEP centroid database with explicit precision"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "OpenCEPGeo contributors"}]
+dependencies = []
+
+[project.scripts]
+opencepgeo = "opencepgeo.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

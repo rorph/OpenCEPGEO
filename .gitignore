@@ -1,1 +1,15 @@
-import_db/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.coverage
+build/
+dist/
+data/
+out/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.gpkg
+*.osm.pbf
+*.zip

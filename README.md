@@ -1,69 +1,110 @@
-## OpenCEP - Gateway e WebService de CEP Grátis
-###  WebService de CEP e IBGE Grátis para E-Commerce, ERP, NFe e muito mais!
+# OpenCEPGeo
 
-Cansado do sistema dos Correios fora do ar? ou ainda pagar por uma simples consulta de CEP?
+OpenCEPGeo builds a versioned, fully offline CEP-to-centroid database for
+Brazil. It preserves OpenCEP address fields and adds an explicit geographic
+estimate with provenance and precision.
 
-Consulte CEPs de todo o Brasil Grátis e sem Limites.
-100% Open Source e altamente disponível usando Google Cloud Storage + CDN CloudFlare!
+The project does **not** call BrasilAPI, ViaCEP, Correios, OpenCEP, or public
+Nominatim at lookup time. Consumers query a local SQLite artifact.
 
-### Alternativa para Busca CEP dos Correios, ViaCEP e API Consulta CEP!
-A maior e mais completa API.
+## Why
 
-Um total <b>1.192.347 CEPs</b> válidos!
+CEP datasets generally contain address and IBGE municipality identifiers, but
+not coordinates. Treating every geocode as exact hides potentially large
+errors. OpenCEPGeo resolves each valid CEP through a documented hierarchy:
 
-### Estamos online desde 2021!
+1. `observed_cep`: robust centroid of trusted points observed at that CEP.
+2. `observed_cep_prefix`: robust centroid of at least three points sharing the
+   first five CEP digits **and** the same IBGE municipality. Prefix estimates
+   are rejected when their radius exceeds the configured safety threshold.
+3. `municipality`: official IBGE city/locality point joined through the
+   seven-digit municipality code.
+4. `unresolved`: address data is retained, but no coordinate is invented.
 
-Perfeito para autocomplete e preenchimento de informações!
+Every located row includes `precision`, `sample_size`, `radius_km`, and
+`geo_source`.
 
-### Super fácil de usar e integrar com todas as plataformas:
+## Data inputs
 
-```markdown
-opencep.com/v1/15050305
+- [OpenCEP release](https://github.com/SeuAliado/OpenCEP/releases) (`v1.zip`):
+  CEP, address, UF, and IBGE municipality code.
+- [IBGE Localidades do Brasil](https://www.ibge.gov.br/geociencias/organizacao-do-territorio/estrutura-territorial/27385-localidades.html)
+  GeoPackage: official municipality/locality reference points.
+- Optional observations CSV: trusted CEP points from first-party datasets such
+  as already-geocoded stores.
+
+OpenCEPGeo does not redistribute these inputs. Review [NOTICE.md](NOTICE.md)
+before publishing derived artifacts.
+
+The exact private-build inputs are pinned by size and SHA-256 in
+[`sources/lock.json`](sources/lock.json). Fetch and re-verify required inputs
+without silently accepting upstream changes:
+
+```bash
+opencepgeo sources fetch --lock sources/lock.json --input-dir data/locked
+opencepgeo sources verify --lock sources/lock.json --input-dir data/locked
 ```
-ou
-```markdown
-opencep.com/v1/15050305.json
+
+See the [source provenance and publication gate](docs/source-provenance.md)
+before selecting optional observations/OSM inputs or distributing artifacts.
+
+## Quick start
+
+Requires Python 3.11 or newer and has no runtime Python dependencies.
+
+```bash
+python -m pip install -e .
+
+opencepgeo build \
+  --opencep data/v1.zip \
+  --ibge data/BR_localidades_2022.gpkg \
+  --observations data/observations.csv \
+  --source-version opencep-2.0.1+ibge-localidades-2022 \
+  --output out/opencepgeo.sqlite
+
+opencepgeo lookup --database out/opencepgeo.sqlite 01001000
 ```
 
-### Use todas as integração em várias linguagens no Postman:
+The observations CSV has this contract:
 
-[![Run in Postman](https://run.pstmn.io/button.svg)](https://app.getpostman.com/run-collection/3084518-e1c46f9e-fd0d-4cb6-8d02-0ba532273e5a?action=collection%2Ffork&collection-url=entityId%3D3084518-e1c46f9e-fd0d-4cb6-8d02-0ba532273e5a%26entityType%3Dcollection%26workspaceId%3D121752ec-9dfc-4ea6-8ad0-9e3fe06c3558)
+```csv
+cep,ibge,latitude,longitude,source
+01001000,3550308,-23.5505,-46.6333,first-party-store
+```
 
-### Cansou de esperar? Api até 10X mais Rápido com resposta média de 50 ms:
+`ibge` is required for prefix aggregation. Exact CEP observations remain
+usable without it.
 
-Não importa onde esta localizado o seu servidor usamos uma CDN global junto com a metodologia
-JAMSTACK e isso deixa super rápido e disponível com SLA de 99,99% e ainda Grátis!
+## Output contract
 
-Teste você mesmo!
+The SQLite database contains one `cep_geo` row per valid OpenCEP record. A
+lookup is represented as:
 
-### HTTPS sempre e CORS livre!
+```json
+{
+  "cep": "01001000",
+  "uf": "SP",
+  "city": "São Paulo",
+  "ibge": "3550308",
+  "geo": {
+    "type": "Point",
+    "coordinates": [-46.6333, -23.5505],
+    "precision": "observed_cep",
+    "sample_size": 1,
+    "radius_km": 0.0,
+    "source": ["first-party-store"]
+  }
+}
+```
 
-Compátivel com todas as APIs e plataformas.
+GeoJSON coordinate order is longitude, latitude.
 
-### Não quer depender de nenhuma API? Coloque no seu servidor!
+## Validation
 
-Faça download do banco de dados dos correios ibge e CEP na versão mais atual no link abaixo e hospede em qualquer local:
+```bash
+PYTHONPATH=src python -m unittest discover -s tests -v
+```
 
-https://github.com/SeuAliado/OpenCEP/releases/
-
-### Achou um CEP incorreto?
-
-Faça um pull request com os dados corretos. Simples, prático e eficiente!
-
-### Atualização dos Correios?!
-
-Atualizamos frequentemente a base de dados junto com os Correios!
-
-### Achou um erro?
-
-Abra um Issue no GitHub.
-
-### Sugestões ou Críticas?!
-
-Abra um chamado que vamos ficar feliz em ajudar!
-
-### Gostou e quer ajudar?
-
-Um star no gihub ajuda muito!!!!
-
-Obrigado!
+See [ADR 0001](docs/adr/0001-offline-centroid-pipeline.md) for the design and
+trade-offs. Downstream bulk consumers should follow the
+[Price Index integration contract](docs/price-index-integration.md).
