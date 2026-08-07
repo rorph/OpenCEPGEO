@@ -1,0 +1,23 @@
+{
+  "format": "opencepgeo-enrichment-v1",
+  "version": "enrichment-2026.2.1-v1",
+  "offline": true,
+  "tier_order": [
+    "observed_cep",
+    "osm_postcode",
+    "observed_cep_prefix",
+    "municipality",
+    "unresolved"
+  ],
+  "thresholds": {
+    "min_prefix_samples": 3,
+    "max_prefix_radius_km": 25.0,
+    "max_observed_radius_km": 10.0,
+    "max_osm_radius_km": 5.0,
+    "outlier_min_samples": 3,
+    "outlier_mad_multiplier": 3.0,
+    "outlier_floor_km": 0.25
+  },
+  "street_matching": "disabled-reject-ambiguous-street-only-evidence",
+  "osm_evidence": "explicit-postcode-tagged-nodes-only"
+}

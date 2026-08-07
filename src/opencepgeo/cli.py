@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .database import build_database, lookup
+from .osm import PBFError, extract_postcode_nodes
 from .source_lock import SourceLockError, fetch_sources, verify_sources
 
 
@@ -22,6 +23,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     build.add_argument("--ibge", required=True, help="IBGE Localidades GeoPackage")
     build.add_argument("--observations", help="optional trusted CEP observations CSV")
+    build.add_argument("--osm-observations", help="local extracted OSM postcode CSV")
+    build.add_argument(
+        "--config",
+        default="config/enrichment-v1.json",
+        help="versioned enrichment thresholds",
+    )
     source_metadata = build.add_mutually_exclusive_group(required=True)
     source_metadata.add_argument("--source-lock", help="checksum-locked input manifest")
     source_metadata.add_argument(
@@ -30,8 +37,6 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--output", required=True, help="output SQLite path")
     build.add_argument("--export", help="canonical CEP-sorted JSONL output")
     build.add_argument("--manifest", help="deterministic build manifest")
-    build.add_argument("--min-prefix-samples", type=int, default=3)
-    build.add_argument("--max-prefix-radius-km", type=float, default=25.0)
     build.add_argument("--force", action="store_true")
 
     query = commands.add_parser("lookup", help="look up one CEP in a local artifact")
@@ -50,6 +55,15 @@ def _parser() -> argparse.ArgumentParser:
         source.add_argument("--include-optional", action="store_true")
         if command == "fetch":
             source.add_argument("--timeout", type=float, default=60.0)
+
+    osm = commands.add_parser("osm", help="extract local OSM postcode evidence")
+    osm_commands = osm.add_subparsers(dest="osm_command", required=True)
+    osm_extract = osm_commands.add_parser("extract")
+    osm_extract.add_argument("--pbf", required=True)
+    osm_extract.add_argument("--source-lock", default="sources/lock.json")
+    osm_extract.add_argument("--output", required=True)
+    osm_extract.add_argument("--manifest")
+    osm_extract.add_argument("--force", action="store_true")
     return parser
 
 
@@ -78,19 +92,34 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"sources": results}, sort_keys=True))
         return 0
 
+    if args.command == "osm":
+        try:
+            result = extract_postcode_nodes(
+                args.pbf,
+                args.output,
+                source_lock_path=args.source_lock,
+                manifest_path=args.manifest,
+                force=args.force,
+            )
+        except (PBFError, SourceLockError, OSError, ValueError) as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 2
+        print(json.dumps(result, sort_keys=True))
+        return 0
+
     if args.command == "build":
         output = Path(args.output)
         stats = build_database(
             opencep_path=args.opencep,
             ibge_path=args.ibge,
             observations_path=args.observations,
+            osm_observations_path=args.osm_observations,
+            enrichment_config_path=args.config,
             source_version=args.source_version,
             source_lock_path=args.source_lock,
             output_path=output,
             export_path=args.export or output.with_suffix(".jsonl"),
             manifest_path=args.manifest or output.with_suffix(".manifest.json"),
-            min_prefix_samples=args.min_prefix_samples,
-            max_prefix_radius_km=args.max_prefix_radius_km,
             force=args.force,
         )
         print(json.dumps(stats, sort_keys=True))

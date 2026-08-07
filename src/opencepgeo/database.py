@@ -8,16 +8,18 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
+from .config import EnrichmentConfig, load_enrichment_config
 from .estimator import CentroidEstimator, normalize_cep, normalize_ibge
 from .source_lock import LockedSource, SourceLock, load_source_lock, verify_file
 from .sources import (
     iter_opencep_records,
-    load_ibge_municipality_points,
+    load_ibge_municipality_references,
     load_observations,
+    load_osm_observations,
 )
 
-_SCHEMA_VERSION = "opencepgeo-sqlite-v1"
-_EXPORT_FORMAT = "opencepgeo-jsonl-v1"
+_SCHEMA_VERSION = "opencepgeo-sqlite-v2"
+_EXPORT_FORMAT = "opencepgeo-jsonl-v2"
 _MANIFEST_FORMAT = "opencepgeo-build-manifest-v1"
 
 _SCHEMA = f"""
@@ -47,12 +49,14 @@ CREATE TABLE cep_geo (
     longitude    REAL,
     precision    TEXT CHECK (
         precision IS NULL OR precision IN (
-            'observed_cep', 'observed_cep_prefix', 'municipality'
+            'observed_cep', 'osm_postcode', 'observed_cep_prefix', 'municipality'
         )
     ),
-    sample_size  INTEGER,
-    radius_km    REAL,
-    geo_source   TEXT
+    method          TEXT,
+    evidence_count  INTEGER,
+    uncertainty_km  REAL,
+    geo_source      TEXT,
+    dataset_version TEXT NOT NULL
 ) WITHOUT ROWID;
 
 CREATE INDEX cep_geo_prefix_ibge_idx ON cep_geo (prefix, ibge);
@@ -75,9 +79,11 @@ _ROW_COLUMNS = (
     "latitude",
     "longitude",
     "precision",
-    "sample_size",
-    "radius_km",
+    "method",
+    "evidence_count",
+    "uncertainty_km",
     "geo_source",
+    "dataset_version",
 )
 
 
@@ -91,6 +97,7 @@ def _rows(
     estimator: CentroidEstimator,
     municipality_codes: set[str],
     counters: dict[str, int],
+    dataset_version: str,
 ) -> Iterator[tuple[object, ...]]:
     for record_number, record in enumerate(records, start=1):
         counters["input_records"] += 1
@@ -122,13 +129,15 @@ def _rows(
             estimate.latitude if estimate else None,
             estimate.longitude if estimate else None,
             estimate.precision if estimate else None,
-            estimate.sample_size if estimate else None,
-            estimate.radius_km if estimate else None,
+            estimate.method if estimate else None,
+            estimate.evidence_count if estimate else None,
+            estimate.uncertainty_km if estimate else None,
             (
                 json.dumps(estimate.sources, ensure_ascii=False, separators=(",", ":"))
                 if estimate
                 else None
             ),
+            dataset_version,
         )
 
 
@@ -212,16 +221,18 @@ def _contract_row(row: sqlite3.Row) -> dict[str, object]:
     latitude = record.pop("latitude")
     longitude = record.pop("longitude")
     precision = record.pop("precision")
-    sample_size = record.pop("sample_size")
-    radius_km = record.pop("radius_km")
+    method = record.pop("method")
+    evidence_count = record.pop("evidence_count")
+    uncertainty_km = record.pop("uncertainty_km")
     record["geo"] = None
     if latitude is not None and longitude is not None:
         record["geo"] = {
             "type": "Point",
             "coordinates": [longitude, latitude],
             "precision": precision,
-            "sample_size": sample_size,
-            "radius_km": radius_km,
+            "method": method,
+            "evidence_count": evidence_count,
+            "uncertainty_km": uncertainty_km,
             "source": sources,
         }
     return record
@@ -260,6 +271,59 @@ def _artifact_record(
     return {"filename": path.name, "bytes": byte_size, "sha256": sha256}
 
 
+def _observations_metadata(
+    path: str | Path | None,
+    source_lock_path: str | Path | None,
+) -> dict[str, object] | None:
+    if path is None:
+        return None
+    observation_path = Path(path)
+    artifact = _artifact_record(observation_path)
+    if source_lock_path is not None:
+        source = _locked_source(load_source_lock(source_lock_path), observation_path)
+        artifact["source"] = source.metadata
+    return artifact
+
+
+def _osm_observations_metadata(
+    path: str | Path | None,
+    source_lock_metadata: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if path is None:
+        return None
+    evidence_path = Path(path)
+    artifact = _artifact_record(evidence_path)
+    manifest_path = evidence_path.with_suffix(".manifest.json")
+    if not manifest_path.is_file():
+        if source_lock_metadata is not None:
+            raise ValueError(f"OSM evidence manifest is missing: {manifest_path}")
+        return artifact
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid OSM evidence manifest: {exc}") from exc
+    if (
+        not isinstance(document, dict)
+        or document.get("format") != "opencepgeo-osm-evidence-manifest-v1"
+    ):
+        raise ValueError("unsupported OSM evidence manifest format")
+    if document.get("artifact") != artifact:
+        raise ValueError("OSM evidence bytes do not match its manifest")
+    if source_lock_metadata is not None:
+        manifest_lock = document.get("source_lock")
+        if not isinstance(manifest_lock, dict) or manifest_lock.get(
+            "sha256"
+        ) != source_lock_metadata.get("sha256"):
+            raise ValueError("OSM evidence source lock does not match the build lock")
+    return {
+        "artifact": artifact,
+        "manifest": _artifact_record(manifest_path),
+        "source": document.get("source"),
+        "statistics": document.get("statistics"),
+        "publication_gate": document.get("publication_gate"),
+    }
+
+
 def build_database(
     *,
     opencep_path: str | Path,
@@ -268,6 +332,8 @@ def build_database(
     source_version: str | None = None,
     source_lock_path: str | Path | None = None,
     observations_path: str | Path | None = None,
+    osm_observations_path: str | Path | None = None,
+    enrichment_config_path: str | Path | None = None,
     export_path: str | Path | None = None,
     manifest_path: str | Path | None = None,
     min_prefix_samples: int = 3,
@@ -299,16 +365,42 @@ def build_database(
         if path is not None
     ]
 
-    municipalities = load_ibge_municipality_points(ibge_path)
+    if enrichment_config_path is not None:
+        enrichment, enrichment_record = load_enrichment_config(enrichment_config_path)
+    else:
+        enrichment = EnrichmentConfig(
+            version="inline-fixture-v1",
+            min_prefix_samples=min_prefix_samples,
+            max_prefix_radius_km=max_prefix_radius_km,
+            max_observed_radius_km=10.0,
+            max_osm_radius_km=5.0,
+            outlier_min_samples=3,
+            outlier_mad_multiplier=3.0,
+            outlier_floor_km=0.25,
+        )
+        enrichment_record = None
+
+    municipalities = load_ibge_municipality_references(ibge_path)
     observations = load_observations(observations_path)
+    osm_observations = load_osm_observations(osm_observations_path)
     corrections_record = (
         _artifact_record(corrections_path) if corrections_path else None
+    )
+    observations_record = _observations_metadata(observations_path, source_lock_path)
+    osm_observations_record = _osm_observations_metadata(
+        osm_observations_path, lock_metadata
     )
     estimator = CentroidEstimator(
         observations,
         municipalities,
-        min_prefix_samples=min_prefix_samples,
-        max_prefix_radius_km=max_prefix_radius_km,
+        osm_observations=osm_observations,
+        min_prefix_samples=enrichment.min_prefix_samples,
+        max_prefix_radius_km=enrichment.max_prefix_radius_km,
+        max_observed_radius_km=enrichment.max_observed_radius_km,
+        max_osm_radius_km=enrichment.max_osm_radius_km,
+        outlier_min_samples=enrichment.outlier_min_samples,
+        outlier_mad_multiplier=enrichment.outlier_mad_multiplier,
+        outlier_floor_km=enrichment.outlier_floor_km,
     )
     counters = {"input_records": 0, "ibge_joined": 0}
 
@@ -320,8 +412,9 @@ def build_database(
             (
                 ("format", _SCHEMA_VERSION),
                 ("dataset_version", dataset_version),
-                ("min_prefix_samples", str(min_prefix_samples)),
-                ("max_prefix_radius_km", str(max_prefix_radius_km)),
+                ("enrichment_version", enrichment.version),
+                ("min_prefix_samples", str(enrichment.min_prefix_samples)),
+                ("max_prefix_radius_km", str(enrichment.max_prefix_radius_km)),
             ),
         )
         connection.executemany(
@@ -329,14 +422,16 @@ def build_database(
             INSERT INTO cep_geo (
                 cep, prefix, street, complement, unit, neighborhood,
                 city, uf, state, region, ibge, latitude, longitude,
-                precision, sample_size, radius_km, geo_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                precision, method, evidence_count, uncertainty_km, geo_source,
+                dataset_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _rows(
                 iter_opencep_records(opencep_path, corrections_path),
                 estimator,
                 set(municipalities),
                 counters,
+                dataset_version,
             ),
         )
         connection.commit()
@@ -357,6 +452,20 @@ def build_database(
             "located": located,
             "unresolved": unresolved,
         }
+        tier_counts = {
+            (precision or "unresolved"): count
+            for precision, count in connection.execute(
+                "SELECT precision, count(*) FROM cep_geo GROUP BY precision"
+            )
+        }
+        for precision in (
+            "observed_cep",
+            "osm_postcode",
+            "observed_cep_prefix",
+            "municipality",
+            "unresolved",
+        ):
+            statistics[f"tier_{precision}"] = tier_counts.get(precision, 0)
 
         export_record = None
         if temporary_export is not None and export is not None:
@@ -386,6 +495,11 @@ def build_database(
                 "INSERT INTO metadata (key, value) VALUES (?, ?)",
                 ("opencep_corrections_sha256", str(corrections_record["sha256"])),
             )
+        if enrichment_record is not None:
+            connection.execute(
+                "INSERT INTO metadata (key, value) VALUES (?, ?)",
+                ("enrichment_config_sha256", str(enrichment_record["sha256"])),
+            )
         connection.commit()
         connection.execute("VACUUM")
         connection.close()
@@ -399,11 +513,9 @@ def build_database(
                 "schema_version": _SCHEMA_VERSION,
                 "dataset_version": dataset_version,
                 "configuration": {
-                    "min_prefix_samples": min_prefix_samples,
-                    "max_prefix_radius_km": max_prefix_radius_km,
-                    "observations": (
-                        Path(observations_path).name if observations_path else None
-                    ),
+                    "enrichment": enrichment_record or enrichment.as_dict(),
+                    "observations": observations_record,
+                    "osm_observations": osm_observations_record,
                     "opencep_corrections": corrections_record,
                 },
                 "source_lock": lock_metadata,

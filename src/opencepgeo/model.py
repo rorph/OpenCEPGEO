@@ -26,21 +26,43 @@ class Observation:
 
 
 @dataclass(frozen=True, slots=True)
+class MunicipalityReference:
+    point: Point
+    evidence_count: int
+    uncertainty_km: float
+
+    def __post_init__(self) -> None:
+        if self.evidence_count < 1:
+            raise ValueError("municipality evidence_count must be positive")
+        if self.uncertainty_km < 0:
+            raise ValueError("municipality uncertainty_km must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
 class GeoEstimate:
     latitude: float
     longitude: float
     precision: str
-    sample_size: int
-    radius_km: float | None
+    method: str
+    evidence_count: int
+    uncertainty_km: float
     sources: tuple[str, ...]
+
+    @property
+    def sample_size(self) -> int:
+        return self.evidence_count
+
+    @property
+    def radius_km(self) -> float:
+        return self.uncertainty_km
 
     def as_geojson(self) -> dict[str, object]:
         return {
             "type": "Point",
             "coordinates": [self.longitude, self.latitude],
             "precision": self.precision,
-            "sample_size": self.sample_size,
-            "radius_km": self.radius_km,
+            "method": self.method,
+            "evidence_count": self.evidence_count,
+            "uncertainty_km": self.uncertainty_km,
             "source": list(self.sources),
         }
-

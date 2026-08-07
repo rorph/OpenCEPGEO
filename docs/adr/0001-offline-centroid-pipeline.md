@@ -28,7 +28,8 @@ then the official IBGE municipality point. It never interpolates numeric CEPs
 and never calls a third-party service during lookup.
 
 The public contract uses valid GeoJSON coordinate order and records precision,
-sample count, radius, and source. Unknown locations remain null.
+method, evidence count, uncertainty, source IDs, and dataset version. Unknown
+locations remain null.
 
 ## Consequences
 
@@ -37,6 +38,5 @@ sample count, radius, and source. Unknown locations remain null.
   municipalities; consumers must expose or honor `precision`.
 - Prefix centroids improve automatically as first-party observations grow.
 - Dataset acquisition and redistribution rights remain a release gate.
-- A future self-hosted OSM/Nominatim refinement can add another precision tier
-  without introducing public runtime calls.
-
+- A pinned local OSM extract may add an explicit-postcode precision tier. The
+  build never uses public Nominatim or ambiguous street-only evidence.

@@ -8,13 +8,14 @@ import shutil
 import sqlite3
 import tempfile
 import zipfile
+from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .estimator import normalize_cep, normalize_ibge
-from .model import Observation, Point
+from .estimator import haversine_km, normalize_cep, normalize_ibge
+from .model import MunicipalityReference, Observation, Point
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,18 @@ def load_observations(path: str | Path | None) -> list[Observation]:
     return observations
 
 
+def load_osm_observations(path: str | Path | None) -> list[Observation]:
+    observations = load_observations(path)
+    for observation in observations:
+        if not observation.point.source.startswith("openstreetmap:"):
+            raise ValueError(
+                f"OSM evidence has invalid source ID: {observation.point.source}"
+            )
+        if observation.ibge is not None:
+            raise ValueError("OSM postcode evidence must not assert an IBGE code")
+    return observations
+
+
 def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
@@ -199,7 +212,9 @@ def _ibge_geopackage(path: str | Path) -> Iterator[Path]:
             temporary.unlink(missing_ok=True)
 
 
-def load_ibge_municipality_points(path: str | Path) -> dict[str, Point]:
+def load_ibge_municipality_references(
+    path: str | Path,
+) -> dict[str, MunicipalityReference]:
     """Read municipality reference points directly from the IBGE GeoPackage.
 
     Localidades do Brasil stores latitude and longitude as ordinary attributes,
@@ -236,27 +251,56 @@ def load_ibge_municipality_points(path: str | Path) -> dict[str, Point]:
 
             quoted = _quote_identifier(table)
             query = f"""
-                SELECT CD_MUN, AVG(LAT_LOCALIDADE), AVG(LONG_LOCALIDADE)
+                SELECT CD_MUN, CT_LOCALIDADE, LAT_LOCALIDADE, LONG_LOCALIDADE
                   FROM {quoted}
-                 WHERE CT_LOCALIDADE = 'Cidade'
-                   AND LAT_LOCALIDADE IS NOT NULL
+                 WHERE LAT_LOCALIDADE IS NOT NULL
                    AND LONG_LOCALIDADE IS NOT NULL
-                 GROUP BY CD_MUN
             """
-            points: dict[str, Point] = {}
-            for raw_ibge, latitude, longitude in connection.execute(query):
+            locality_points: dict[str, list[tuple[str, Point]]] = defaultdict(list)
+            for raw_ibge, category, latitude, longitude in connection.execute(query):
                 ibge = normalize_ibge(raw_ibge)
                 if ibge is None:
                     raise ValueError(
                         f"invalid IBGE municipality code in GeoPackage: {raw_ibge!r}"
                     )
-                points[ibge] = Point(
-                    latitude=float(latitude),
-                    longitude=float(longitude),
+                locality_points[ibge].append(
+                    (
+                        str(category),
+                        Point(
+                            latitude=float(latitude),
+                            longitude=float(longitude),
+                            source="ibge-localidades",
+                        ),
+                    )
+                )
+            references: dict[str, MunicipalityReference] = {}
+            for ibge, localities in locality_points.items():
+                cities = [
+                    point for category, point in localities if category == "Cidade"
+                ]
+                if not cities:
+                    continue
+                city = Point(
+                    latitude=sum(point.latitude for point in cities) / len(cities),
+                    longitude=sum(point.longitude for point in cities) / len(cities),
                     source="ibge-localidades",
                 )
-            if not points:
+                references[ibge] = MunicipalityReference(
+                    point=city,
+                    evidence_count=len(localities),
+                    uncertainty_km=round(
+                        max(haversine_km(city, point) for _, point in localities), 3
+                    ),
+                )
+            if not references:
                 raise ValueError("IBGE GeoPackage produced no municipality points")
-            return points
+            return references
         finally:
             connection.close()
+
+
+def load_ibge_municipality_points(path: str | Path) -> dict[str, Point]:
+    return {
+        ibge: reference.point
+        for ibge, reference in load_ibge_municipality_references(path).items()
+    }

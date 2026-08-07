@@ -103,6 +103,7 @@ class PipelineTests(unittest.TestCase):
             )
             build_manifest = json.loads(manifest.read_text())
             self.assertEqual(build_manifest["format"], "opencepgeo-build-manifest-v1")
+            self.assertEqual(build_manifest["schema_version"], "opencepgeo-sqlite-v2")
             self.assertEqual(
                 build_manifest["artifacts"]["normalized"]["sha256"],
                 hashlib.sha256(export.read_bytes()).hexdigest(),
@@ -111,6 +112,10 @@ class PipelineTests(unittest.TestCase):
             exact = lookup(output, "01001-000")
             self.assertEqual(exact["geo"]["precision"], "observed_cep")
             self.assertEqual(exact["geo"]["source"], ["test-store"])
+            self.assertEqual(exact["geo"]["method"], "robust_median_first_party")
+            self.assertEqual(exact["geo"]["evidence_count"], 1)
+            self.assertIsInstance(exact["geo"]["uncertainty_km"], float)
+            self.assertEqual(exact["dataset_version"], "fixture-v1")
 
             fallback = lookup(output, "20010000")
             self.assertEqual(fallback["geo"]["precision"], "municipality")
@@ -247,6 +252,42 @@ class PipelineTests(unittest.TestCase):
                     ibge_path=gpkg,
                     output_path=root / "out.sqlite",
                 )
+
+    def test_build_uses_separate_osm_postcode_tier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gpkg = root / "ibge.gpkg"
+            make_ibge_gpkg(gpkg)
+            source = root / "opencep"
+            source.mkdir()
+            (source / "01001000.json").write_text(
+                json.dumps(
+                    {
+                        "cep": "01001-000",
+                        "localidade": "Sao Paulo",
+                        "uf": "SP",
+                        "ibge": "3550308",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            osm = root / "osm.csv"
+            osm.write_text(
+                "cep,ibge,latitude,longitude,source\n"
+                "01001000,,-23.5501,-46.6334,openstreetmap:node/1\n",
+                encoding="utf-8",
+            )
+            output = root / "out.sqlite"
+            stats = build_database(
+                opencep_path=source,
+                ibge_path=gpkg,
+                osm_observations_path=osm,
+                output_path=output,
+                source_version="fixture-osm",
+            )
+            result = lookup(output, "01001000")
+            self.assertEqual(result["geo"]["precision"], "osm_postcode")
+            self.assertEqual(stats["tier_osm_postcode"], 1)
 
 
 if __name__ == "__main__":

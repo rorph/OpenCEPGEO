@@ -3,19 +3,20 @@
   "$id": "https://github.com/rorph/OpenCEPGEO/schemas/cep-geo.schema.json",
   "title": "OpenCEPGeo lookup result",
   "type": "object",
-  "required": ["cep", "prefix", "geo"],
+  "required": ["cep", "prefix", "dataset_version", "geo"],
   "properties": {
     "cep": {"type": "string", "pattern": "^[0-9]{8}$"},
     "prefix": {"type": "string", "pattern": "^[0-9]{5}$"},
     "ibge": {"type": ["string", "null"], "pattern": "^[0-9]{7}$"},
     "uf": {"type": ["string", "null"]},
     "city": {"type": ["string", "null"]},
+    "dataset_version": {"type": "string", "minLength": 1},
     "geo": {
       "oneOf": [
         {"type": "null"},
         {
           "type": "object",
-          "required": ["type", "coordinates", "precision", "sample_size", "radius_km", "source"],
+          "required": ["type", "coordinates", "precision", "method", "evidence_count", "uncertainty_km", "source"],
           "properties": {
             "type": {"const": "Point"},
             "coordinates": {
@@ -28,10 +29,11 @@
               "maxItems": 2
             },
             "precision": {
-              "enum": ["observed_cep", "observed_cep_prefix", "municipality"]
+              "enum": ["observed_cep", "osm_postcode", "observed_cep_prefix", "municipality"]
             },
-            "sample_size": {"type": "integer", "minimum": 1},
-            "radius_km": {"type": ["number", "null"], "minimum": 0},
+            "method": {"type": "string", "minLength": 1},
+            "evidence_count": {"type": "integer", "minimum": 1},
+            "uncertainty_km": {"type": "number", "minimum": 0},
             "source": {"type": "array", "items": {"type": "string"}}
           },
           "additionalProperties": false
@@ -40,4 +42,3 @@
     }
   }
 }
-

@@ -14,15 +14,16 @@ not coordinates. Treating every geocode as exact hides potentially large
 errors. OpenCEPGeo resolves each valid CEP through a documented hierarchy:
 
 1. `observed_cep`: robust centroid of trusted points observed at that CEP.
-2. `observed_cep_prefix`: robust centroid of at least three points sharing the
+2. `osm_postcode`: robust centroid of local OSM nodes with an explicit CEP tag.
+3. `observed_cep_prefix`: robust centroid of at least three points sharing the
    first five CEP digits **and** the same IBGE municipality. Prefix estimates
    are rejected when their radius exceeds the configured safety threshold.
-3. `municipality`: official IBGE city/locality point joined through the
+4. `municipality`: official IBGE city/locality point joined through the
    seven-digit municipality code.
-4. `unresolved`: address data is retained, but no coordinate is invented.
+5. `unresolved`: address data is retained, but no coordinate is invented.
 
-Every located row includes `precision`, `sample_size`, `radius_km`, and
-`geo_source`.
+Every located row includes `precision`, `method`, `evidence_count`,
+`uncertainty_km`, `geo_source`, and `dataset_version`.
 
 ## Data inputs
 
@@ -59,12 +60,13 @@ opencepgeo build \
   --opencep data/locked/opencep-2.0.1-v1.zip \
   --ibge data/locked/ibge-localidades-2022-gpkg.zip \
   --source-lock sources/lock.json \
+  --config config/enrichment-v1.json \
   --output out/opencepgeo.sqlite
 
 opencepgeo lookup --database out/opencepgeo.sqlite 01001000
 ```
 
-The observations CSV has this contract:
+The first-party observations CSV has this contract:
 
 ```csv
 cep,ibge,latitude,longitude,source
@@ -89,10 +91,12 @@ lookup is represented as:
     "type": "Point",
     "coordinates": [-46.6333, -23.5505],
     "precision": "observed_cep",
-    "sample_size": 1,
-    "radius_km": 0.0,
+    "method": "robust_median_first_party",
+    "evidence_count": 1,
+    "uncertainty_km": 0.0,
     "source": ["first-party-store"]
-  }
+  },
+  "dataset_version": "2026.2.1-rc1"
 }
 ```
 
@@ -109,3 +113,5 @@ trade-offs. Downstream bulk consumers should follow the
 [Price Index integration contract](docs/price-index-integration.md).
 The three-artifact output and reproducibility identity are specified by the
 [deterministic build contract](docs/build-contract.md).
+Optional first-party and local OSM inputs follow the fail-closed
+[offline enrichment contract](docs/enrichment.md).
