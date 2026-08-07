@@ -56,10 +56,9 @@ Requires Python 3.11 or newer and has no runtime Python dependencies.
 python -m pip install -e .
 
 opencepgeo build \
-  --opencep data/v1.zip \
-  --ibge data/BR_localidades_2022.gpkg \
-  --observations data/observations.csv \
-  --source-version opencep-2.0.1+ibge-localidades-2022 \
+  --opencep data/locked/opencep-2.0.1-v1.zip \
+  --ibge data/locked/ibge-localidades-2022-gpkg.zip \
+  --source-lock sources/lock.json \
   --output out/opencepgeo.sqlite
 
 opencepgeo lookup --database out/opencepgeo.sqlite 01001000
@@ -108,3 +107,5 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 See [ADR 0001](docs/adr/0001-offline-centroid-pipeline.md) for the design and
 trade-offs. Downstream bulk consumers should follow the
 [Price Index integration contract](docs/price-index-integration.md).
+The three-artifact output and reproducibility identity are specified by the
+[deterministic build contract](docs/build-contract.md).

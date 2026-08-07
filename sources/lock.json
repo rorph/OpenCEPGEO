@@ -23,6 +23,7 @@
       "license_url": "https://github.com/SeuAliado/OpenCEP/blob/d0f37beb65c1aa54141e17c528f1a434e9a18de4/LICENSE",
       "license_status": "repository-mit-database-rights-unclear",
       "terms_status": "blocks-public-source-and-derived-data-release",
+      "corrections": "opencep-2.0.1-corrections.json",
       "notes": "The repository license does not explicitly license the released database or document its DNE extraction rights."
     },
     {

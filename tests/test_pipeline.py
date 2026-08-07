@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -77,14 +78,35 @@ class PipelineTests(unittest.TestCase):
                 )
 
             output = root / "opencepgeo.sqlite"
+            export = root / "opencepgeo.jsonl"
+            manifest = root / "opencepgeo.manifest.json"
             stats = build_database(
                 opencep_path=archive_path,
                 ibge_path=gpkg,
                 observations_path=observations,
                 output_path=output,
+                export_path=export,
+                manifest_path=manifest,
                 source_version="fixture-v1",
             )
-            self.assertEqual(stats, {"rows": 2, "located": 2, "unresolved": 0})
+            self.assertEqual(stats["input_records"], 2)
+            self.assertEqual(stats["unique_ceps"], 2)
+            self.assertEqual(stats["ibge_join_rate"], 1.0)
+            self.assertEqual(stats["located"], 2)
+            self.assertEqual(stats["unresolved"], 0)
+
+            normalized_rows = [
+                json.loads(line) for line in export.read_text().splitlines()
+            ]
+            self.assertEqual(
+                [row["cep"] for row in normalized_rows], ["01001000", "20010000"]
+            )
+            build_manifest = json.loads(manifest.read_text())
+            self.assertEqual(build_manifest["format"], "opencepgeo-build-manifest-v1")
+            self.assertEqual(
+                build_manifest["artifacts"]["normalized"]["sha256"],
+                hashlib.sha256(export.read_bytes()).hexdigest(),
+            )
 
             exact = lookup(output, "01001-000")
             self.assertEqual(exact["geo"]["precision"], "observed_cep")
@@ -101,6 +123,17 @@ class PipelineTests(unittest.TestCase):
             points = load_ibge_municipality_points(gpkg)
             self.assertEqual(set(points), {"3550308", "3304557"})
             self.assertAlmostEqual(points["3550308"].latitude, -23.5505)
+
+    def test_reads_single_geopackage_from_locked_zip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gpkg = root / "ibge.gpkg"
+            make_ibge_gpkg(gpkg)
+            archive = root / "ibge.zip"
+            with zipfile.ZipFile(archive, "w") as output:
+                output.write(gpkg, "BR_localidades_2022.gpkg")
+            points = load_ibge_municipality_points(archive)
+            self.assertEqual(set(points), {"3550308", "3304557"})
 
     def test_rejects_duplicate_ceps(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -127,6 +160,93 @@ class PipelineTests(unittest.TestCase):
                     source_version="fixture-duplicates",
                 )
             self.assertFalse(output.exists())
+
+    def test_rejects_invalid_cep_instead_of_skipping_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gpkg = root / "ibge.gpkg"
+            make_ibge_gpkg(gpkg)
+            source = root / "opencep"
+            source.mkdir()
+            (source / "bad.json").write_text(
+                json.dumps(
+                    {
+                        "cep": "invalid",
+                        "localidade": "Sao Paulo",
+                        "uf": "SP",
+                        "ibge": "3550308",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid CEP"):
+                build_database(
+                    opencep_path=source,
+                    ibge_path=gpkg,
+                    output_path=root / "out.sqlite",
+                    source_version="fixture-invalid",
+                )
+
+    def test_repeated_builds_have_identical_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gpkg = root / "ibge.gpkg"
+            make_ibge_gpkg(gpkg)
+            source = root / "opencep"
+            source.mkdir()
+            records = [
+                {
+                    "cep": "20010000",
+                    "localidade": "Rio de Janeiro",
+                    "uf": "RJ",
+                    "ibge": "3304557",
+                },
+                {
+                    "cep": "01001000",
+                    "localidade": "Sao Paulo",
+                    "uf": "SP",
+                    "ibge": "3550308",
+                },
+            ]
+            for index, record in enumerate(records):
+                (source / f"{index}.json").write_text(
+                    json.dumps(record), encoding="utf-8"
+                )
+
+            artifacts = []
+            for suffix in ("one", "two"):
+                output = root / f"{suffix}.sqlite"
+                export = root / f"{suffix}.jsonl"
+                manifest = root / f"{suffix}.manifest.json"
+                build_database(
+                    opencep_path=source,
+                    ibge_path=gpkg,
+                    output_path=output,
+                    export_path=export,
+                    manifest_path=manifest,
+                    source_version="fixture-deterministic",
+                )
+                artifacts.append((output.read_bytes(), export.read_bytes()))
+
+            self.assertEqual(artifacts[0], artifacts[1])
+            rows = [json.loads(line) for line in artifacts[0][1].splitlines()]
+            self.assertEqual([row["cep"] for row in rows], ["01001000", "20010000"])
+
+    def test_requires_source_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gpkg = root / "ibge.gpkg"
+            make_ibge_gpkg(gpkg)
+            source = root / "opencep"
+            source.mkdir()
+            with self.assertRaisesRegex(
+                ValueError, "source_version or source_lock_path"
+            ):
+                build_database(
+                    opencep_path=source,
+                    ibge_path=gpkg,
+                    output_path=root / "out.sqlite",
+                )
 
 
 if __name__ == "__main__":

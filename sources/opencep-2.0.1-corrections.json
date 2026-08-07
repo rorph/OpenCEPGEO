@@ -1,0 +1,14 @@
+{
+  "format": "opencepgeo-corrections-v1",
+  "source_id": "opencep-2.0.1",
+  "corrections": [
+    {
+      "member": "v1/69310188.json",
+      "source_sha256": "f6427aac3e343ffa8bd61ebe17d277fb10ba34cde17e31d4e98f3a22f014a97c",
+      "field": "cep",
+      "from": "70864-040",
+      "to": "69310-188",
+      "reason": "The member name and Boa Vista/RR address with IBGE 1400100 identify CEP 69310-188; the source payload duplicates the unrelated Brasilia/DF CEP 70864-040."
+    }
+  ]
+}
