@@ -64,7 +64,14 @@ class PipelineTests(unittest.TestCase):
             with observations.open("w", encoding="utf-8", newline="") as handle:
                 writer = csv.DictWriter(
                     handle,
-                    fieldnames=["cep", "ibge", "latitude", "longitude", "source"],
+                    fieldnames=[
+                        "cep",
+                        "ibge",
+                        "latitude",
+                        "longitude",
+                        "source",
+                        "evidence_id",
+                    ],
                 )
                 writer.writeheader()
                 writer.writerow(
@@ -74,6 +81,7 @@ class PipelineTests(unittest.TestCase):
                         "latitude": "-23.55",
                         "longitude": "-46.63",
                         "source": "test-store",
+                        "evidence_id": "test-store:location/1",
                     }
                 )
 
@@ -102,8 +110,11 @@ class PipelineTests(unittest.TestCase):
                 [row["cep"] for row in normalized_rows], ["01001000", "20010000"]
             )
             build_manifest = json.loads(manifest.read_text())
-            self.assertEqual(build_manifest["format"], "opencepgeo-build-manifest-v1")
-            self.assertEqual(build_manifest["schema_version"], "opencepgeo-sqlite-v2")
+            self.assertEqual(build_manifest["format"], "opencepgeo-build-manifest-v2")
+            self.assertEqual(build_manifest["schema_version"], "opencepgeo-sqlite-v4")
+            self.assertRegex(
+                build_manifest["builder"]["source_tree_sha256"], r"^[0-9a-f]{64}$"
+            )
             self.assertEqual(
                 build_manifest["artifacts"]["normalized"]["sha256"],
                 hashlib.sha256(export.read_bytes()).hexdigest(),
@@ -112,9 +123,10 @@ class PipelineTests(unittest.TestCase):
             exact = lookup(output, "01001-000")
             self.assertEqual(exact["geo"]["precision"], "observed_cep")
             self.assertEqual(exact["geo"]["source"], ["test-store"])
+            self.assertRegex(exact["geo"]["evidence_digest"], r"^sha256:[0-9a-f]{64}$")
             self.assertEqual(exact["geo"]["method"], "robust_median_first_party")
             self.assertEqual(exact["geo"]["evidence_count"], 1)
-            self.assertIsInstance(exact["geo"]["uncertainty_km"], float)
+            self.assertIsInstance(exact["geo"]["evidence_radius_km"], float)
             self.assertEqual(exact["dataset_version"], "fixture-v1")
 
             fallback = lookup(output, "20010000")

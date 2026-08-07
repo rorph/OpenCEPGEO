@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .estimator import haversine_km, normalize_cep, normalize_ibge
+from .estimator import evidence_digest, haversine_km, normalize_cep, normalize_ibge
 from .model import MunicipalityReference, Observation, Point
 
 
@@ -136,10 +136,13 @@ def iter_opencep_records(
         raise ValueError(f"unused OpenCEP correction(s): {', '.join(unused)}")
 
 
-def load_observations(path: str | Path | None) -> list[Observation]:
+def load_observations(
+    path: str | Path | None, *, require_evidence_id: bool = False
+) -> list[Observation]:
     if path is None:
         return []
     observations: list[Observation] = []
+    identities: dict[str, Observation] = {}
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         required = {"cep", "latitude", "longitude", "source"}
@@ -149,19 +152,57 @@ def load_observations(path: str | Path | None) -> list[Observation]:
             cep = normalize_cep(row.get("cep"))
             if cep is None:
                 raise ValueError(f"invalid CEP at observations row {row_number}")
+            raw_ibge = str(row.get("ibge") or "").strip()
+            ibge = normalize_ibge(raw_ibge)
+            if raw_ibge and ibge is None:
+                raise ValueError(f"invalid IBGE at observations row {row_number}")
+            explicit_identity = str(row.get("evidence_id") or "").strip()
+            if require_evidence_id and not explicit_identity:
+                raise ValueError(
+                    f"production first-party observation requires evidence_id at row "
+                    f"{row_number}"
+                )
             try:
+                latitude = float(row["latitude"])
+                longitude = float(row["longitude"])
+                identity_payload = "|".join(
+                    (
+                        row["source"].strip(),
+                        cep,
+                        ibge or "",
+                        latitude.hex(),
+                        longitude.hex(),
+                    )
+                ).encode("utf-8")
+                evidence_id = (
+                    explicit_identity
+                    or (
+                        row["source"].strip()
+                        if row["source"].strip().startswith("openstreetmap:")
+                        else "sha256:" + hashlib.sha256(identity_payload).hexdigest()
+                    )
+                )
                 point = Point(
-                    latitude=float(row["latitude"]),
-                    longitude=float(row["longitude"]),
+                    latitude=latitude,
+                    longitude=longitude,
                     source=row["source"].strip(),
+                    evidence_id=evidence_id,
                 )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     f"invalid observation at row {row_number}: {exc}"
                 ) from exc
-            observations.append(
-                Observation(cep=cep, ibge=normalize_ibge(row.get("ibge")), point=point)
-            )
+            observation = Observation(cep=cep, ibge=ibge, point=point)
+            previous = identities.get(evidence_id)
+            if previous is not None:
+                if previous != observation:
+                    raise ValueError(
+                        f"conflicting duplicate observation source identity at row "
+                        f"{row_number}: {evidence_id}"
+                    )
+                continue
+            identities[evidence_id] = observation
+            observations.append(observation)
     return observations
 
 
@@ -288,9 +329,10 @@ def load_ibge_municipality_references(
                 references[ibge] = MunicipalityReference(
                     point=city,
                     evidence_count=len(localities),
-                    uncertainty_km=round(
+                    evidence_radius_km=round(
                         max(haversine_km(city, point) for _, point in localities), 3
                     ),
+                    evidence_digest=evidence_digest(point for _, point in localities),
                 )
             if not references:
                 raise ValueError("IBGE GeoPackage produced no municipality points")

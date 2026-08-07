@@ -1,6 +1,6 @@
 {
   "format": "opencepgeo-enrichment-v1",
-  "version": "enrichment-2026.2.1-v1",
+  "version": "enrichment-2026.2.1-v2",
   "offline": true,
   "tier_order": [
     "observed_cep",
@@ -14,10 +14,12 @@
     "max_prefix_radius_km": 25.0,
     "max_observed_radius_km": 10.0,
     "max_osm_radius_km": 5.0,
+    "max_osm_municipality_distance_km": 250.0,
     "outlier_min_samples": 3,
     "outlier_mad_multiplier": 3.0,
     "outlier_floor_km": 0.25
   },
   "street_matching": "disabled-reject-ambiguous-street-only-evidence",
-  "osm_evidence": "explicit-postcode-tagged-nodes-only"
+  "osm_evidence": "explicit-postcode-tagged-nodes-contained-by-the-locked-official-target-municipality-polygon-and-corroborated-by-the-target-ibge-reference-within-the-configured-distance",
+  "osm_boundary_validation": "IBGE Malha Municipal 2024 polygon containment is the primary eligibility gate; the 250-km IBGE Localidades reference-point distance is an independent coarse backstop"
 }

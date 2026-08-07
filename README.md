@@ -14,7 +14,10 @@ not coordinates. Treating every geocode as exact hides potentially large
 errors. OpenCEPGeo resolves each valid CEP through a documented hierarchy:
 
 1. `observed_cep`: robust centroid of trusted points observed at that CEP.
-2. `osm_postcode`: robust centroid of local OSM nodes with an explicit CEP tag.
+2. `osm_postcode`: robust centroid of local OSM nodes with an explicit CEP tag,
+   retained only when each point is inside or on the locked official polygon
+   for the CEP's target municipality. The configured 250 km distance to the
+   IBGE locality reference point remains an independent coarse backstop.
 3. `observed_cep_prefix`: robust centroid of at least three points sharing the
    first five CEP digits **and** the same IBGE municipality. Prefix estimates
    are rejected when their radius exceeds the configured safety threshold.
@@ -23,7 +26,11 @@ errors. OpenCEPGeo resolves each valid CEP through a documented hierarchy:
 5. `unresolved`: address data is retained, but no coordinate is invented.
 
 Every located row includes `precision`, `method`, `evidence_count`,
-`uncertainty_km`, `geo_source`, and `dataset_version`.
+`evidence_radius_km`, bounded source categories, a fixed `evidence_digest`, and
+`dataset_version`. Individual OSM node IDs are not repeated in each row; the
+build manifest checksums the evidence dataset. `evidence_radius_km` is the
+spread of retained evidence around its centroid, not a calibrated position
+error or confidence bound.
 
 ## Data inputs
 
@@ -31,6 +38,9 @@ Every located row includes `precision`, `method`, `evidence_count`,
   CEP, address, UF, and IBGE municipality code.
 - [IBGE Localidades do Brasil](https://www.ibge.gov.br/geociencias/organizacao-do-territorio/estrutura-territorial/27385-localidades.html)
   GeoPackage: official municipality/locality reference points.
+- [IBGE Malha Municipal 2024](https://www.ibge.gov.br/geociencias/organizacao-do-territorio/malhas-territoriais/15774-malhas.html):
+  official polygons used to reject OSM points outside the CEP's target
+  municipality before they can influence an artifact.
 - Optional observations CSV: trusted CEP points from first-party datasets such
   as already-geocoded stores.
 
@@ -44,6 +54,12 @@ without silently accepting upstream changes:
 ```bash
 opencepgeo sources fetch --lock sources/lock.json --input-dir data/locked
 opencepgeo sources verify --lock sources/lock.json --input-dir data/locked
+
+# Production OSM builds also require these checksum-locked optional inputs.
+opencepgeo sources fetch --lock sources/lock.json --input-dir data/locked \
+  --source ibge-municipios-2024 --source geofabrik-brazil-260806
+opencepgeo sources verify --lock sources/lock.json --input-dir data/locked \
+  --source ibge-municipios-2024 --source geofabrik-brazil-260806
 ```
 
 See the [source provenance and publication gate](docs/source-provenance.md)
@@ -59,6 +75,8 @@ python -m pip install -e .
 opencepgeo build \
   --opencep data/locked/opencep-2.0.1-v1.zip \
   --ibge data/locked/ibge-localidades-2022-gpkg.zip \
+  --municipality-boundaries data/locked/BR_Municipios_2024.zip \
+  --osm-observations data/derived/osm-postcodes.csv \
   --source-lock sources/lock.json \
   --config config/enrichment-v1.json \
   --quality-config config/quality-v1.json \
@@ -67,15 +85,18 @@ opencepgeo build \
 opencepgeo lookup --database out/opencepgeo.sqlite 01001000
 ```
 
-The first-party observations CSV has this contract:
+The production first-party observations CSV has this contract:
 
 ```csv
-cep,ibge,latitude,longitude,source
-01001000,3550308,-23.5505,-46.6333,first-party-store
+cep,ibge,latitude,longitude,source,evidence_id
+01001000,3550308,-23.5505,-46.6333,first-party-store,store-location:123
 ```
 
 `ibge` is required for prefix aggregation. Exact CEP observations remain
-usable without it.
+usable without it. Every production first-party row requires a stable,
+source-owned `evidence_id`; duplicate identities with different data fail the
+build. Coordinate-derived identities are supported only by the lower-level
+loader for legacy or synthetic fixtures.
 
 ## Output contract
 
@@ -94,10 +115,11 @@ lookup is represented as:
     "precision": "observed_cep",
     "method": "robust_median_first_party",
     "evidence_count": 1,
-    "uncertainty_km": 0.0,
-    "source": ["first-party-store"]
+    "evidence_radius_km": 0.0,
+    "source": ["first-party-store"],
+    "evidence_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   },
-  "dataset_version": "2026.2.1-rc1"
+  "dataset_version": "2026.2.1-rc2"
 }
 ```
 
@@ -110,7 +132,8 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
 Production artifacts are also checked against versioned geographic,
-count/coverage, consistency, and holdout error thresholds. See the
+count/coverage, consistency, two complementary deterministic OSM cohorts, and
+a BA-only independent official pilot. See the
 [quality calibration contract](docs/quality.md).
 
 See [ADR 0001](docs/adr/0001-offline-centroid-pipeline.md) for the design and
@@ -120,3 +143,5 @@ The three-artifact output and reproducibility identity are specified by the
 [deterministic build contract](docs/build-contract.md).
 Optional first-party and local OSM inputs follow the fail-closed
 [offline enrichment contract](docs/enrichment.md).
+Validated artifacts are assembled and checked through the
+[private release-candidate contract](docs/release.md).

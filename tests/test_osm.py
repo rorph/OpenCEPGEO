@@ -7,7 +7,7 @@ import unittest
 import zlib
 from pathlib import Path
 
-from opencepgeo.osm import extract_postcode_nodes
+from opencepgeo.osm import PBFError, extract_postcode_nodes, iter_osm_nodes
 
 
 def varint(value: int) -> bytes:
@@ -56,7 +56,37 @@ def fixture_pbf(path: Path) -> None:
     path.write_bytes(struct.pack(">I", len(header)) + header + blob)
 
 
+def write_compressed_blob(path: Path, compressed: bytes, raw_size: int) -> None:
+    blob = scalar(2, raw_size) + message(3, compressed)
+    header = message(1, b"OSMData") + scalar(3, len(blob))
+    path.write_bytes(struct.pack(">I", len(header)) + header + blob)
+
+
 class OSMExtractionTests(unittest.TestCase):
+    def test_rejects_declared_decompression_bomb_before_allocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bomb.osm.pbf"
+            write_compressed_blob(path, zlib.compress(b"x"), 32 * 1024 * 1024 + 1)
+            with self.assertRaisesRegex(PBFError, "safe limit"):
+                list(iter_osm_nodes(path))
+
+    def test_rejects_payload_exceeding_declared_raw_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "oversized.osm.pbf"
+            write_compressed_blob(path, zlib.compress(b"x" * 1024), 10)
+            with self.assertRaisesRegex(PBFError, "exceeds declared"):
+                list(iter_osm_nodes(path))
+
+    def test_rejects_trailing_compressed_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trailing.osm.pbf"
+            payload = b"not-a-primitive-block"
+            write_compressed_blob(
+                path, zlib.compress(payload) + zlib.compress(b"trailing"), len(payload)
+            )
+            with self.assertRaisesRegex(PBFError, "trailing compressed"):
+                list(iter_osm_nodes(path))
+
     def test_extracts_only_explicit_postcode_nodes_offline(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -69,6 +99,7 @@ class OSMExtractionTests(unittest.TestCase):
                     {
                         "format": "opencepgeo-source-lock-v1",
                         "release": "fixture-v1",
+                        "publication_gate": "blocked-test-only",
                         "sources": [
                             {
                                 "id": "fixture-osm",
@@ -80,6 +111,10 @@ class OSMExtractionTests(unittest.TestCase):
                                 "sha256": hashlib.sha256(payload).hexdigest(),
                                 "acquisition": "https",
                                 "url": "https://example.invalid/fixture.osm.pbf",
+                                "retrieved_at": "2026-08-06T00:00:00Z",
+                                "attribution": "OSM fixture",
+                                "license_status": "test-only",
+                                "terms_status": "test-only",
                             }
                         ],
                     }

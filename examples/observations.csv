@@ -1,3 +1,2 @@
-cep,ibge,latitude,longitude,source
-01001000,3550308,-23.5505,-46.6333,example-first-party-point
-
+cep,ibge,latitude,longitude,source,evidence_id
+01001000,3550308,-23.5505,-46.6333,example-first-party,example-first-party:store/fixture-1

@@ -23,13 +23,18 @@ systems need a local lookup that reports the quality of every estimate.
 ## Decision
 
 Use option 3. The pipeline streams OpenCEP records into SQLite and estimates a
-point using trusted exact observations, safe same-municipality prefix groups,
-then the official IBGE municipality point. It never interpolates numeric CEPs
-and never calls a third-party service during lookup.
+point using trusted exact observations, locally extracted explicit-postcode
+OSM points contained by the CEP's locked official municipality polygon and
+corroborated against its IBGE municipality reference point,
+safe same-municipality prefix groups, then the official IBGE municipality
+point. It never interpolates numeric CEPs and never calls a third-party service
+during lookup.
 
 The public contract uses valid GeoJSON coordinate order and records precision,
-method, evidence count, uncertainty, source IDs, and dataset version. Unknown
-locations remain null.
+method, evidence count, retained-evidence radius, bounded source categories, a
+fixed evidence digest, and dataset version. The radius is not a calibrated
+position-error bound. Individual evidence IDs stay in the checksum-locked
+input rather than growing each output row. Unknown locations remain null.
 
 ## Consequences
 
@@ -37,6 +42,11 @@ locations remain null.
 - Municipality fallbacks are deliberately coarse, especially for large rural
   municipalities; consumers must expose or honor `precision`.
 - Prefix centroids improve automatically as first-party observations grow.
+- Production first-party rows require stable source-owned evidence identities;
+  conflicting reuse fails closed.
+- IBGE Malha Municipal 2024 supplies the primary containment polygons. The
+  IBGE Localidades reference-point distance remains an independent coarse
+  safety backstop rather than a substitute for containment.
 - Dataset acquisition and redistribution rights remain a release gate.
 - A pinned local OSM extract may add an explicit-postcode precision tier. The
   build never uses public Nominatim or ambiguous street-only evidence.

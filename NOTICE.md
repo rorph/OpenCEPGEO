@@ -10,8 +10,9 @@ artifacts may be governed by different terms.
   commercial address database and asserts rights over that database.
 - IBGE publishes Localidades do Brasil as public geoscience data. Preserve the
   dataset name, edition, source URL, and attribution in generated releases.
-- OpenStreetMap-derived refinements, if added later, are governed by ODbL and
-  require attribution. Public Nominatim must never be bulk queried.
+- OpenStreetMap explicit-postcode refinements are governed by ODbL and require
+  OpenStreetMap contributor attribution and a derived-database share-alike
+  assessment. Public Nominatim must never be bulk queried.
 
 The machine-readable input boundary is `sources/lock.json`; its checksums and
 rights-status fields are evidence, not a license grant. Public redistribution

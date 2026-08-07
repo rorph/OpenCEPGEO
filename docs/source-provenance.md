@@ -23,10 +23,23 @@ opencepgeo sources fetch \
   --source first-party-observations-example
 ```
 
+A production OSM build must opt into both locked geospatial inputs:
+
+```bash
+opencepgeo sources fetch \
+  --lock sources/lock.json \
+  --input-dir data/locked \
+  --source ibge-municipios-2024 \
+  --source geofabrik-brazil-260806
+```
+
 The commands never accept changed bytes. A missing input fails verification;
 an existing file with a different size or digest is left untouched and fails.
 A download is written to a temporary sibling file, validated, and only then
-renamed to its locked filename.
+renamed to its locked filename. HTTPS reads are bounded by the locked byte
+count and reject inconsistent `Content-Length`, early EOF, and trailing bytes.
+Every source, including repository-resident corrections, must record non-empty
+retrieval, attribution, license-status, and terms-status metadata.
 
 ## Redistribution decision
 
@@ -39,9 +52,13 @@ renamed to its locked filename.
   is therefore **blocked pending written rights review**.
 - IBGE describes the download directory as public and must be attributed as
   `Censo Demografico 2022: Localidades do Brasil`, including its edition and
-  source URL. This does not clear the OpenCEP-derived artifact gate.
+  source URL. The separately locked `Malha Municipal 2024` polygon archive is
+  used only for OSM evidence containment and requires the same provenance and
+  attribution discipline. Neither clears the OpenCEP-derived artifact gate.
 - First-party observations require their own documented collection authority
-  and sharing scope. The repository includes only a synthetic example.
+  and sharing scope. Production inputs must include a stable source-owned
+  `evidence_id` for every row; reused identities with different data fail
+  closed. The repository includes only a synthetic example.
 - The optional Geofabrik/OpenStreetMap snapshot is ODbL 1.0 data. Any release
   using it needs OpenStreetMap contributor attribution, ODbL database notices,
   and a share-alike assessment for the derived database.

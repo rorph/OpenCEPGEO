@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from opencepgeo.source_lock import (
     SourceLockError,
@@ -22,6 +24,7 @@ class SourceLockTests(unittest.TestCase):
         lock = {
             "format": "opencepgeo-source-lock-v1",
             "release": "fixture-v1",
+            "publication_gate": "blocked-test-only",
             "sources": [
                 {
                     "id": "fixture",
@@ -34,7 +37,9 @@ class SourceLockTests(unittest.TestCase):
                     "acquisition": "repository",
                     "local_path": "fixture.bin",
                     "retrieved_at": "2026-08-06T00:00:00Z",
+                    "attribution": "Test fixture",
                     "license_status": "test-only",
+                    "terms_status": "test-only",
                 }
             ],
         }
@@ -95,6 +100,92 @@ class SourceLockTests(unittest.TestCase):
             lock_path.write_text(json.dumps(document), encoding="utf-8")
             with self.assertRaisesRegex(SourceLockError, "lowercase hexadecimal"):
                 load_source_lock(lock_path)
+
+    def test_rejects_missing_rights_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path, _ = self._fixture(root)
+            for field in (
+                "retrieved_at",
+                "attribution",
+                "license_status",
+                "terms_status",
+            ):
+                with self.subTest(field=field):
+                    document = json.loads(lock_path.read_text(encoding="utf-8"))
+                    document["sources"][0].pop(field, None)
+                    lock_path.write_text(json.dumps(document), encoding="utf-8")
+                    with self.assertRaisesRegex(SourceLockError, field):
+                        load_source_lock(lock_path)
+                    document["sources"][0][field] = "test-only"
+                    lock_path.write_text(json.dumps(document), encoding="utf-8")
+
+    def test_rejects_missing_publication_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path, _ = self._fixture(root)
+            document = json.loads(lock_path.read_text(encoding="utf-8"))
+            del document["publication_gate"]
+            lock_path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(SourceLockError, "publication_gate"):
+                load_source_lock(lock_path)
+
+    def test_rejects_malformed_archive_member_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path, _ = self._fixture(root)
+            document = json.loads(lock_path.read_text(encoding="utf-8"))
+            document["sources"][0]["members"] = {
+                "../unsafe.bin": {"bytes": 1, "sha256": "0" * 64}
+            }
+            lock_path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(SourceLockError, "unsafe"):
+                load_source_lock(lock_path)
+
+            document["sources"][0]["members"] = {
+                "safe.bin": {"bytes": 1, "sha256": "0" * 64, "extra": True}
+            }
+            lock_path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(SourceLockError, "exactly"):
+                load_source_lock(lock_path)
+
+    def test_download_rejects_advertised_size_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path, payload = self._fixture(root)
+            document = json.loads(lock_path.read_text(encoding="utf-8"))
+            source = document["sources"][0]
+            source["acquisition"] = "https"
+            source["url"] = "https://example.invalid/fixture.bin"
+            source.pop("local_path")
+            lock_path.write_text(json.dumps(document), encoding="utf-8")
+            response = io.BytesIO(payload)
+            response.headers = {"Content-Length": str(len(payload) + 1)}
+            with mock.patch(
+                "opencepgeo.source_lock.urllib.request.urlopen",
+                return_value=response,
+            ):
+                with self.assertRaisesRegex(SourceLockError, "server advertised"):
+                    fetch_sources(lock_path, root / "inputs")
+
+    def test_download_rejects_payload_larger_than_locked_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path, payload = self._fixture(root)
+            document = json.loads(lock_path.read_text(encoding="utf-8"))
+            source = document["sources"][0]
+            source["acquisition"] = "https"
+            source["url"] = "https://example.invalid/fixture.bin"
+            source.pop("local_path")
+            lock_path.write_text(json.dumps(document), encoding="utf-8")
+            response = io.BytesIO(payload + b"x")
+            response.headers = {}
+            with mock.patch(
+                "opencepgeo.source_lock.urllib.request.urlopen",
+                return_value=response,
+            ):
+                with self.assertRaisesRegex(SourceLockError, "exceeds locked size"):
+                    fetch_sources(lock_path, root / "inputs")
 
 
 if __name__ == "__main__":

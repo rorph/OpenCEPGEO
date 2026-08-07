@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from .quality import (
     quality_report_markdown,
     write_quality_report,
 )
+from .release import package_release, verify_release
 from .source_lock import SourceLockError, fetch_sources, verify_sources
 
 
@@ -29,6 +31,10 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--ibge", required=True, help="IBGE Localidades GeoPackage")
     build.add_argument("--observations", help="optional trusted CEP observations CSV")
     build.add_argument("--osm-observations", help="local extracted OSM postcode CSV")
+    build.add_argument(
+        "--municipality-boundaries",
+        help="official IBGE municipality polygon ZIP used to validate OSM evidence",
+    )
     build.add_argument(
         "--config",
         default="config/enrichment-v1.json",
@@ -79,13 +85,42 @@ def _parser() -> argparse.ArgumentParser:
     quality_commands = quality.add_subparsers(dest="quality_command", required=True)
     quality_report = quality_commands.add_parser("report")
     quality_report.add_argument("--database", required=True)
+    quality_report.add_argument("--build-manifest", required=True)
     quality_report.add_argument("--ibge", required=True)
     quality_report.add_argument("--osm-observations", required=True)
     quality_report.add_argument("--official-holdout", required=True)
+    quality_report.add_argument("--official-holdout-id", required=True)
+    quality_report.add_argument("--municipality-boundaries", required=True)
     quality_report.add_argument("--config", default="config/enrichment-v1.json")
     quality_report.add_argument("--quality-config", default="config/quality-v1.json")
     quality_report.add_argument("--output", required=True)
     quality_report.add_argument("--markdown")
+
+    release = commands.add_parser("release", help="package or verify a local release")
+    release_commands = release.add_subparsers(dest="release_command", required=True)
+    release_package = release_commands.add_parser("package")
+    release_package.add_argument("--database", required=True)
+    release_package.add_argument("--normalized", required=True)
+    release_package.add_argument("--build-manifest", required=True)
+    release_package.add_argument("--quality-report", required=True)
+    release_package.add_argument("--quality-markdown", required=True)
+    release_package.add_argument("--notice", default="NOTICE.md")
+    release_package.add_argument("--source-lock", default="sources/lock.json")
+    release_package.add_argument(
+        "--enrichment-config", default="config/enrichment-v1.json"
+    )
+    release_package.add_argument("--quality-policy", default="config/quality-v1.json")
+    release_package.add_argument("--ibge", required=True)
+    release_package.add_argument("--osm-observations", required=True)
+    release_package.add_argument("--official-holdout", required=True)
+    release_package.add_argument("--official-holdout-id", required=True)
+    release_package.add_argument("--municipality-boundaries", required=True)
+    release_package.add_argument(
+        "--corrections", default="sources/opencep-2.0.1-corrections.json"
+    )
+    release_package.add_argument("--output", required=True)
+    release_verify = release_commands.add_parser("verify")
+    release_verify.add_argument("directory")
     return parser
 
 
@@ -133,9 +168,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             report = build_quality_report(
                 database_path=args.database,
+                build_manifest_path=args.build_manifest,
                 ibge_path=args.ibge,
                 osm_observations_path=args.osm_observations,
                 official_holdout_path=args.official_holdout,
+                official_holdout_source_id=args.official_holdout_id,
+                municipality_boundaries_path=args.municipality_boundaries,
                 enrichment_config_path=args.config,
                 quality_policy_path=args.quality_config,
             )
@@ -155,6 +193,35 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0 if report["status"] == "pass" else 2
 
+    if args.command == "release":
+        try:
+            if args.release_command == "package":
+                result = package_release(
+                    database_path=args.database,
+                    normalized_path=args.normalized,
+                    build_manifest_path=args.build_manifest,
+                    quality_report_path=args.quality_report,
+                    quality_markdown_path=args.quality_markdown,
+                    notice_path=args.notice,
+                    source_lock_path=args.source_lock,
+                    enrichment_config_path=args.enrichment_config,
+                    quality_policy_path=args.quality_policy,
+                    ibge_path=args.ibge,
+                    osm_observations_path=args.osm_observations,
+                    official_holdout_path=args.official_holdout,
+                    official_holdout_source_id=args.official_holdout_id,
+                    municipality_boundaries_path=args.municipality_boundaries,
+                    corrections_path=args.corrections,
+                    output_directory=args.output,
+                )
+            else:
+                result = verify_release(args.directory)
+        except (FileExistsError, OSError, sqlite3.DatabaseError, ValueError) as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 2
+        print(json.dumps(result, sort_keys=True))
+        return 0
+
     if args.command == "build":
         output = Path(args.output)
         stats = build_database(
@@ -162,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             ibge_path=args.ibge,
             observations_path=args.observations,
             osm_observations_path=args.osm_observations,
+            municipality_boundaries_path=args.municipality_boundaries,
             enrichment_config_path=args.config,
             quality_config_path=args.quality_config,
             source_version=args.source_version,

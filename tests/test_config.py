@@ -10,7 +10,8 @@ class EnrichmentConfigTests(unittest.TestCase):
     def test_repository_config_is_versioned_and_checksum_bound(self):
         path = Path("config/enrichment-v1.json")
         config, metadata = load_enrichment_config(path)
-        self.assertEqual(config.version, "enrichment-2026.2.1-v1")
+        self.assertEqual(config.version, "enrichment-2026.2.1-v2")
+        self.assertEqual(config.max_osm_municipality_distance_km, 250.0)
         self.assertEqual(metadata["filename"], path.name)
         self.assertEqual(len(metadata["sha256"]), 64)
 

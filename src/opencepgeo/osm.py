@@ -20,6 +20,10 @@ class PBFError(ValueError):
     """The local OSM PBF is malformed or uses an unsupported encoding."""
 
 
+_MAX_BLOB_SIZE = 64 * 1024 * 1024
+_MAX_RAW_BLOB_SIZE = 32 * 1024 * 1024
+
+
 def _varint(data: bytes, position: int) -> tuple[int, int]:
     value = 0
     shift = 0
@@ -259,7 +263,7 @@ def iter_osm_nodes(
                 raise PBFError("OSM blob header type is missing")
             blob_type = type_values[0].decode("ascii")
             blob_size = _scalar(header, 3)
-            if not 0 < blob_size <= 64 * 1024 * 1024:
+            if not 0 < blob_size <= _MAX_BLOB_SIZE:
                 raise PBFError(f"invalid OSM blob size: {blob_size}")
             blob = handle.read(blob_size)
             if len(blob) != blob_size:
@@ -267,13 +271,36 @@ def iter_osm_nodes(
 
             raw_values = _field_values(blob, 1)
             zlib_values = _field_values(blob, 3)
+            if raw_values and zlib_values:
+                raise PBFError("OSM blob has multiple compression payloads")
             if len(raw_values) == 1 and isinstance(raw_values[0], bytes):
                 payload = raw_values[0]
+                if len(payload) > _MAX_RAW_BLOB_SIZE:
+                    raise PBFError("OSM raw blob exceeds safe uncompressed size")
             elif len(zlib_values) == 1 and isinstance(zlib_values[0], bytes):
+                raw_size_values = _field_values(blob, 2)
+                if len(raw_size_values) != 1 or not isinstance(
+                    raw_size_values[0], int
+                ):
+                    raise PBFError("compressed OSM blob raw size is missing")
+                raw_size = raw_size_values[0]
+                if not 0 < raw_size <= _MAX_RAW_BLOB_SIZE:
+                    raise PBFError(
+                        f"OSM blob raw size exceeds safe limit: {raw_size}"
+                    )
                 try:
-                    payload = zlib.decompress(zlib_values[0])
+                    decompressor = zlib.decompressobj()
+                    payload = decompressor.decompress(zlib_values[0], raw_size + 1)
                 except zlib.error as exc:
                     raise PBFError(f"invalid zlib OSM blob: {exc}") from exc
+                if (
+                    len(payload) > raw_size
+                    or decompressor.unconsumed_tail
+                    or not decompressor.eof
+                ):
+                    raise PBFError("OSM zlib blob exceeds declared raw size")
+                if decompressor.unused_data:
+                    raise PBFError("OSM zlib blob has trailing compressed data")
             else:
                 raise PBFError("OSM blob compression is unsupported")
             raw_size = _scalar(blob, 2, len(payload))

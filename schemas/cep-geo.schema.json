@@ -3,20 +3,26 @@
   "$id": "https://github.com/rorph/OpenCEPGEO/schemas/cep-geo.schema.json",
   "title": "OpenCEPGeo lookup result",
   "type": "object",
-  "required": ["cep", "prefix", "dataset_version", "geo"],
+  "required": ["cep", "prefix", "street", "complement", "unit", "neighborhood", "city", "uf", "state", "region", "ibge", "dataset_version", "geo"],
   "properties": {
     "cep": {"type": "string", "pattern": "^[0-9]{8}$"},
     "prefix": {"type": "string", "pattern": "^[0-9]{5}$"},
-    "ibge": {"type": ["string", "null"], "pattern": "^[0-9]{7}$"},
-    "uf": {"type": ["string", "null"]},
-    "city": {"type": ["string", "null"]},
+    "street": {"type": ["string", "null"]},
+    "complement": {"type": ["string", "null"]},
+    "unit": {"type": ["string", "null"]},
+    "neighborhood": {"type": ["string", "null"]},
+    "city": {"type": "string", "minLength": 1},
+    "uf": {"type": "string", "pattern": "^[A-Z]{2}$"},
+    "state": {"type": ["string", "null"]},
+    "region": {"type": ["string", "null"]},
+    "ibge": {"type": "string", "pattern": "^[0-9]{7}$"},
     "dataset_version": {"type": "string", "minLength": 1},
     "geo": {
       "oneOf": [
         {"type": "null"},
         {
           "type": "object",
-          "required": ["type", "coordinates", "precision", "method", "evidence_count", "uncertainty_km", "source"],
+          "required": ["type", "coordinates", "precision", "method", "evidence_count", "evidence_radius_km", "source", "evidence_digest"],
           "properties": {
             "type": {"const": "Point"},
             "coordinates": {
@@ -33,12 +39,20 @@
             },
             "method": {"type": "string", "minLength": 1},
             "evidence_count": {"type": "integer", "minimum": 1},
-            "uncertainty_km": {"type": "number", "minimum": 0},
-            "source": {"type": "array", "items": {"type": "string"}}
+            "evidence_radius_km": {"type": "number", "minimum": 0},
+            "source": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1, "maxLength": 64},
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true
+            },
+            "evidence_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
           },
           "additionalProperties": false
         }
       ]
     }
-  }
+  },
+  "additionalProperties": false
 }

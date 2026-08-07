@@ -8,10 +8,18 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
+from .boundaries import select_municipality_observations
 from .config import EnrichmentConfig, load_enrichment_config
 from .estimator import CentroidEstimator, normalize_cep, normalize_ibge
+from .provenance import builder_identity
 from .quality import enforce_build_quality, load_quality_policy
-from .source_lock import LockedSource, SourceLock, load_source_lock, verify_file
+from .source_lock import (
+    LockedSource,
+    SourceLock,
+    load_source_lock,
+    repository_source_path,
+    verify_file,
+)
 from .sources import (
     iter_opencep_records,
     load_ibge_municipality_references,
@@ -19,9 +27,9 @@ from .sources import (
     load_osm_observations,
 )
 
-_SCHEMA_VERSION = "opencepgeo-sqlite-v2"
-_EXPORT_FORMAT = "opencepgeo-jsonl-v2"
-_MANIFEST_FORMAT = "opencepgeo-build-manifest-v1"
+_SCHEMA_VERSION = "opencepgeo-sqlite-v4"
+_EXPORT_FORMAT = "opencepgeo-jsonl-v4"
+_MANIFEST_FORMAT = "opencepgeo-build-manifest-v2"
 
 _SCHEMA = f"""
 PRAGMA page_size = 4096;
@@ -35,17 +43,24 @@ CREATE TABLE metadata (
 ) WITHOUT ROWID;
 
 CREATE TABLE cep_geo (
-    cep          TEXT PRIMARY KEY,
-    prefix       TEXT NOT NULL,
+    cep          TEXT PRIMARY KEY CHECK (
+        length(cep) = 8 AND cep NOT GLOB '*[^0-9]*'
+    ),
+    prefix       TEXT NOT NULL CHECK (
+        length(prefix) = 5 AND prefix NOT GLOB '*[^0-9]*'
+        AND prefix = substr(cep, 1, 5)
+    ),
     street       TEXT,
     complement   TEXT,
     unit         TEXT,
     neighborhood TEXT,
     city         TEXT NOT NULL,
-    uf           TEXT NOT NULL,
+    uf           TEXT NOT NULL CHECK (length(uf) = 2),
     state        TEXT,
     region       TEXT,
-    ibge         TEXT NOT NULL,
+    ibge         TEXT NOT NULL CHECK (
+        length(ibge) = 7 AND ibge NOT GLOB '*[^0-9]*'
+    ),
     latitude     REAL,
     longitude    REAL,
     precision    TEXT CHECK (
@@ -54,10 +69,32 @@ CREATE TABLE cep_geo (
         )
     ),
     method          TEXT,
-    evidence_count  INTEGER,
-    uncertainty_km  REAL,
-    geo_source      TEXT,
-    dataset_version TEXT NOT NULL
+    evidence_count INTEGER CHECK (
+        evidence_count IS NULL OR evidence_count > 0
+    ),
+    evidence_radius_km REAL CHECK (
+        evidence_radius_km IS NULL OR evidence_radius_km >= 0
+    ),
+    geo_source      TEXT CHECK (geo_source IS NULL OR length(geo_source) <= 2048),
+    evidence_digest TEXT CHECK (
+        evidence_digest IS NULL OR (
+            length(evidence_digest) = 71 AND
+            substr(evidence_digest, 1, 7) = 'sha256:' AND
+            substr(evidence_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    dataset_version TEXT NOT NULL,
+    CHECK (
+        (latitude IS NULL AND longitude IS NULL AND precision IS NULL
+         AND method IS NULL AND evidence_count IS NULL
+         AND evidence_radius_km IS NULL AND geo_source IS NULL
+         AND evidence_digest IS NULL)
+        OR
+        (latitude IS NOT NULL AND longitude IS NOT NULL AND precision IS NOT NULL
+         AND method IS NOT NULL AND evidence_count IS NOT NULL
+         AND evidence_radius_km IS NOT NULL AND geo_source IS NOT NULL
+         AND evidence_digest IS NOT NULL)
+    )
 ) WITHOUT ROWID;
 
 CREATE INDEX cep_geo_prefix_ibge_idx ON cep_geo (prefix, ibge);
@@ -82,8 +119,9 @@ _ROW_COLUMNS = (
     "precision",
     "method",
     "evidence_count",
-    "uncertainty_km",
+    "evidence_radius_km",
     "geo_source",
+    "evidence_digest",
     "dataset_version",
 )
 
@@ -132,12 +170,13 @@ def _rows(
             estimate.precision if estimate else None,
             estimate.method if estimate else None,
             estimate.evidence_count if estimate else None,
-            estimate.uncertainty_km if estimate else None,
+            estimate.evidence_radius_km if estimate else None,
             (
                 json.dumps(estimate.sources, ensure_ascii=False, separators=(",", ":"))
                 if estimate
                 else None
             ),
+            estimate.evidence_digest if estimate else None,
             dataset_version,
         )
 
@@ -200,14 +239,18 @@ def _source_metadata(
             "publication_gate"
         ),
     }
-    corrections = selected[0].metadata.get("corrections")
+    corrections = selected[0].metadata.get("corrections_source_id")
     corrections_path = None
     if corrections is not None:
-        if not isinstance(corrections, str) or Path(corrections).name != corrections:
-            raise ValueError(
-                "OpenCEP correction path in source lock must be a basename"
-            )
-        corrections_path = lock.path.parent / corrections
+        if not isinstance(corrections, str) or not corrections.strip():
+            raise ValueError("OpenCEP corrections_source_id must be non-empty")
+        matches = [source for source in lock.sources if source.source_id == corrections]
+        if len(matches) != 1:
+            raise ValueError("OpenCEP correction source is not uniquely locked")
+        correction_source = matches[0]
+        corrections_path = repository_source_path(lock, correction_source)
+        verify_file(corrections_path, correction_source)
+        selected.append(correction_source)
     return (
         lock.release,
         lock_metadata,
@@ -218,13 +261,15 @@ def _source_metadata(
 
 def _contract_row(row: sqlite3.Row) -> dict[str, object]:
     record = {column: row[column] for column in _ROW_COLUMNS}
-    sources = json.loads(record.pop("geo_source")) if record.get("geo_source") else []
+    raw_sources = record.pop("geo_source")
+    sources = json.loads(raw_sources) if raw_sources else []
+    evidence_digest = record.pop("evidence_digest")
     latitude = record.pop("latitude")
     longitude = record.pop("longitude")
     precision = record.pop("precision")
     method = record.pop("method")
     evidence_count = record.pop("evidence_count")
-    uncertainty_km = record.pop("uncertainty_km")
+    evidence_radius_km = record.pop("evidence_radius_km")
     record["geo"] = None
     if latitude is not None and longitude is not None:
         record["geo"] = {
@@ -233,8 +278,9 @@ def _contract_row(row: sqlite3.Row) -> dict[str, object]:
             "precision": precision,
             "method": method,
             "evidence_count": evidence_count,
-            "uncertainty_km": uncertainty_km,
+            "evidence_radius_km": evidence_radius_km,
             "source": sources,
+            "evidence_digest": evidence_digest,
         }
     return record
 
@@ -272,6 +318,33 @@ def _artifact_record(
     return {"filename": path.name, "bytes": byte_size, "sha256": sha256}
 
 
+def _input_record(path: str | Path) -> dict[str, object]:
+    source = Path(path)
+    if source.is_file():
+        return _artifact_record(source)
+    if not source.is_dir():
+        raise ValueError(f"build input does not exist: {source}")
+    digest = hashlib.sha256()
+    byte_size = 0
+    for child in sorted(
+        (candidate for candidate in source.rglob("*") if candidate.is_file()),
+        key=lambda candidate: candidate.relative_to(source).as_posix(),
+    ):
+        name = child.relative_to(source).as_posix().encode("utf-8")
+        payload = child.read_bytes()
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+        byte_size += len(payload)
+    return {
+        "filename": source.name,
+        "bytes": byte_size,
+        "sha256": digest.hexdigest(),
+        "format": "deterministic-directory-tree-v1",
+    }
+
+
 def _observations_metadata(
     path: str | Path | None,
     source_lock_path: str | Path | None,
@@ -298,7 +371,7 @@ def _osm_observations_metadata(
     if not manifest_path.is_file():
         if source_lock_metadata is not None:
             raise ValueError(f"OSM evidence manifest is missing: {manifest_path}")
-        return artifact
+        return {"artifact": artifact, "manifest": None}
     try:
         document = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -325,6 +398,23 @@ def _osm_observations_metadata(
     }
 
 
+def _opencep_targets(
+    path: str | Path,
+    corrections_path: str | Path | None,
+    needed_ceps: set[str],
+) -> dict[str, str]:
+    targets: dict[str, str] = {}
+    for record in iter_opencep_records(path, corrections_path):
+        cep = normalize_cep(record.get("cep"))
+        if cep not in needed_ceps:
+            continue
+        ibge = normalize_ibge(record.get("ibge"))
+        if ibge is None:
+            raise ValueError(f"invalid target IBGE for OSM CEP {cep}")
+        targets[cep] = ibge
+    return targets
+
+
 def build_database(
     *,
     opencep_path: str | Path,
@@ -334,6 +424,7 @@ def build_database(
     source_lock_path: str | Path | None = None,
     observations_path: str | Path | None = None,
     osm_observations_path: str | Path | None = None,
+    municipality_boundaries_path: str | Path | None = None,
     enrichment_config_path: str | Path | None = None,
     quality_config_path: str | Path | None = None,
     export_path: str | Path | None = None,
@@ -376,6 +467,7 @@ def build_database(
             max_prefix_radius_km=max_prefix_radius_km,
             max_observed_radius_km=10.0,
             max_osm_radius_km=5.0,
+            max_osm_municipality_distance_km=250.0,
             outlier_min_samples=3,
             outlier_mad_multiplier=3.0,
             outlier_floor_km=0.25,
@@ -394,8 +486,77 @@ def build_database(
         quality_record = None
 
     municipalities = load_ibge_municipality_references(ibge_path)
-    observations = load_observations(observations_path)
+    observations = load_observations(
+        observations_path, require_evidence_id=observations_path is not None
+    )
     osm_observations = load_osm_observations(osm_observations_path)
+    boundary_record = None
+    boundary_selection = None
+    expected_boundary_members = None
+    if osm_observations and source_lock_path is not None and municipality_boundaries_path is None:
+        raise ValueError(
+            "checksum-locked OSM builds require official municipality boundaries"
+        )
+    if municipality_boundaries_path is not None:
+        boundary_record = _input_record(municipality_boundaries_path)
+        if source_lock_path is not None:
+            boundary_source = _locked_source(
+                load_source_lock(source_lock_path), municipality_boundaries_path
+            )
+            if all(
+                source.get("id") != boundary_source.source_id
+                for source in locked_sources
+            ):
+                locked_sources.append(boundary_source.metadata)
+            raw_members = boundary_source.metadata.get("members")
+            if not isinstance(raw_members, dict):
+                raise ValueError("locked municipality boundaries require member identities")
+            expected_boundary_members = raw_members
+            boundary_record["members"] = raw_members
+        targets = _opencep_targets(
+            opencep_path,
+            corrections_path,
+            {observation.cep for observation in osm_observations},
+        )
+        selection = select_municipality_observations(
+            municipality_boundaries_path,
+            osm_observations,
+            targets,
+            expected_members=expected_boundary_members,
+        )
+        if (
+            len(selection.interior_target_municipality)
+            + len(selection.boundary_target_municipality)
+            + len(selection.outside_target_municipality)
+            + len(selection.unknown_cep)
+            != len(osm_observations)
+        ):
+            raise ValueError("municipality boundary selection counts are inconsistent")
+        boundary_selection = {
+            "method": "ibge-2024-municipality-polygon-containment-v1",
+            "input_observations": len(osm_observations),
+            "known_target_observations": (
+                len(osm_observations) - len(selection.unknown_cep)
+            ),
+            "eligible_observations": len(selection.eligible),
+            "interior_target_municipality": len(
+                selection.interior_target_municipality
+            ),
+            "boundary_target_municipality": len(
+                selection.boundary_target_municipality
+            ),
+            "excluded_observations": len(selection.outside_target_municipality),
+            "excluded_by_reason": {
+                "outside_target_municipality": len(
+                    selection.outside_target_municipality
+                )
+            },
+            "outside_target_municipality": len(
+                selection.outside_target_municipality
+            ),
+            "unknown_cep": len(selection.unknown_cep),
+        }
+        osm_observations = list(selection.eligible)
     corrections_record = (
         _artifact_record(corrections_path) if corrections_path else None
     )
@@ -411,12 +572,14 @@ def build_database(
         max_prefix_radius_km=enrichment.max_prefix_radius_km,
         max_observed_radius_km=enrichment.max_observed_radius_km,
         max_osm_radius_km=enrichment.max_osm_radius_km,
+        max_osm_municipality_distance_km=enrichment.max_osm_municipality_distance_km,
         outlier_min_samples=enrichment.outlier_min_samples,
         outlier_mad_multiplier=enrichment.outlier_mad_multiplier,
         outlier_floor_km=enrichment.outlier_floor_km,
     )
     counters = {"input_records": 0, "ibge_joined": 0}
 
+    identity = builder_identity()
     connection = sqlite3.connect(temporary_output)
     try:
         connection.executescript(_SCHEMA)
@@ -425,6 +588,9 @@ def build_database(
             (
                 ("format", _SCHEMA_VERSION),
                 ("dataset_version", dataset_version),
+                ("builder_name", identity["name"]),
+                ("builder_version", identity["version"]),
+                ("builder_source_tree_sha256", identity["source_tree_sha256"]),
                 ("enrichment_version", enrichment.version),
                 ("min_prefix_samples", str(enrichment.min_prefix_samples)),
                 ("max_prefix_radius_km", str(enrichment.max_prefix_radius_km)),
@@ -435,9 +601,9 @@ def build_database(
             INSERT INTO cep_geo (
                 cep, prefix, street, complement, unit, neighborhood,
                 city, uf, state, region, ibge, latitude, longitude,
-                precision, method, evidence_count, uncertainty_km, geo_source,
-                dataset_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                precision, method, evidence_count, evidence_radius_km, geo_source,
+                evidence_digest, dataset_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _rows(
                 iter_opencep_records(opencep_path, corrections_path),
@@ -526,6 +692,9 @@ def build_database(
             )
         connection.commit()
         connection.execute("VACUUM")
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        if integrity != "ok":
+            raise ValueError(f"SQLite integrity check failed before promotion: {integrity}")
         connection.close()
         connection = None
 
@@ -536,11 +705,18 @@ def build_database(
                 "format": _MANIFEST_FORMAT,
                 "schema_version": _SCHEMA_VERSION,
                 "dataset_version": dataset_version,
+                "builder": identity,
+                "inputs": {
+                    "opencep": _input_record(opencep_path),
+                    "ibge": _input_record(ibge_path),
+                    "municipality_boundaries": boundary_record,
+                },
                 "configuration": {
                     "enrichment": enrichment_record or enrichment.as_dict(),
                     "quality": quality_record,
                     "observations": observations_record,
                     "osm_observations": osm_observations_record,
+                    "osm_boundary_selection": boundary_selection,
                     "opencep_corrections": corrections_record,
                 },
                 "source_lock": lock_metadata,
@@ -602,6 +778,12 @@ def lookup(database_path: str | Path, cep: object) -> dict[str, object] | None:
     )
     connection.row_factory = sqlite3.Row
     try:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        if metadata.get("format") != _SCHEMA_VERSION:
+            raise ValueError(
+                f"incompatible SQLite schema: {metadata.get('format')!r}; "
+                f"expected {_SCHEMA_VERSION!r}"
+            )
         row = connection.execute(
             "SELECT * FROM cep_geo WHERE cep = ?", (cep8,)
         ).fetchone()

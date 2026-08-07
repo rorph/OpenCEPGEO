@@ -1,6 +1,6 @@
 {
-  "format": "opencepgeo-quality-policy-v1",
-  "version": "quality-2026.2.1",
+  "format": "opencepgeo-quality-policy-v2",
+  "version": "quality-2026.2.1-rc2",
   "brazil_bounds": {
     "latitude_min": -34.0,
     "latitude_max": 5.5,
@@ -15,6 +15,9 @@
     "maximum_invalid_bounds": 0,
     "maximum_uf_ibge_mismatches": 0,
     "maximum_municipality_conflicts": 0,
+    "maximum_geo_source_bytes": 2048,
+    "maximum_evidence_digest_bytes": 71,
+    "maximum_invalid_evidence_digests": 0,
     "allowed_precision_tiers": [
       "observed_cep",
       "osm_postcode",
@@ -22,22 +25,107 @@
       "municipality"
     ]
   },
-  "holdout": {
-    "algorithm": "sha256-modulus-v1",
+  "validation": {
+    "algorithm": "sha256-modulus-v2",
     "modulus": 5,
     "remainder": 0,
-    "minimum_records": 80000,
-    "minimum_official_records": 35,
-    "minimum_ufs": 27,
-    "required_address_classes": [
-      "urban_address_proxy",
-      "rural_or_general_address_proxy"
-    ]
-  },
-  "error_thresholds_km": {
-    "overall_p95": 10.0,
-    "official_overall_p95": 20.0,
-    "osm_postcode_p95": 2.0,
-    "municipality_p95": 50.0
+    "osm_evidence": {
+      "maximum_outside_target_municipality_fraction": 0.005
+    },
+    "cohorts": {
+      "leave_observation_out": {
+        "minimum_records": 75000,
+        "maximum_missing_fraction": 0.02,
+        "maximum_prediction_failure_fraction": 0.02,
+        "minimum_ufs": 27,
+        "required_address_classes": [
+          "urban_address_proxy",
+          "rural_or_general_address_proxy"
+        ]
+      },
+      "unseen_cep": {
+        "minimum_records": 80000,
+        "maximum_missing_fraction": 0.02,
+        "maximum_prediction_failure_fraction": 0.02,
+        "minimum_ufs": 27,
+        "required_address_classes": [
+          "urban_address_proxy",
+          "rural_or_general_address_proxy"
+        ]
+      }
+    },
+    "per_uf": {
+      "cohort": "unseen_cep",
+      "required_ufs": [
+        "AC", "AL", "AM", "AP", "BA", "CE", "DF", "ES", "GO",
+        "MA", "MG", "MS", "MT", "PA", "PB", "PE", "PI", "PR",
+        "RJ", "RN", "RO", "RS", "SC", "SE", "SP", "TO"
+      ],
+      "thresholds": {
+        "AC": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "AL": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "AM": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "AP": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "BA": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "CE": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "DF": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "ES": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "GO": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "MA": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "MG": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "MS": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "MT": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "PA": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "PB": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "PE": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "PI": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "PR": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "RJ": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "RN": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "RO": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "RS": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "SC": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "SE": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "SP": {"minimum_samples": 50, "maximum_p95_km": 125.0},
+        "TO": {"minimum_samples": 50, "maximum_p95_km": 125.0}
+      }
+    },
+    "purposes": {
+      "nearby_store_same_cep_proxy": {
+        "cohort": "leave_observation_out",
+        "allowed_precision_tiers": ["osm_postcode"],
+        "minimum_records": 75000,
+        "maximum_p95_km": 2.0
+      },
+      "regional_fallback_unseen_cep": {
+        "cohort": "unseen_cep",
+        "allowed_precision_tiers": ["municipality"],
+        "minimum_records": 75000,
+        "maximum_p95_km": 50.0
+      },
+      "rr_osm_postcode_same_cep": {
+        "cohort": "leave_observation_out",
+        "ufs": ["RR"],
+        "allowed_precision_tiers": ["osm_postcode"],
+        "minimum_records": 10,
+        "maximum_p95_km": 2.0,
+        "rationale": "RR production-retained OSM-tier predictions retain the same strict same-CEP consistency ceiling as the national OSM tier; this is not a positional-accuracy claim."
+      },
+      "rr_municipality_coarse_address_exception": {
+        "cohort": "unseen_cep",
+        "ufs": ["RR"],
+        "allowed_precision_tiers": ["municipality"],
+        "minimum_records": 50,
+        "maximum_p95_km": 150.0,
+        "rationale": "Coarse-address-only operational exception for RR's unusually large municipalities; this ceiling is not a precision claim, raw diagnostics remain uncensored, and municipality estimates are forbidden for nearby-store ranking."
+      }
+    },
+    "official_pilot": {
+      "minimum_records": 35,
+      "maximum_missing_fraction": 0.0,
+      "maximum_prediction_failure_fraction": 0.0,
+      "expected_ufs": ["BA"],
+      "maximum_p95_km": 20.0
+    }
   }
 }

@@ -44,6 +44,41 @@ def _require_string(value: object, field: str) -> str:
     return value
 
 
+def _validate_member_identities(value: object, field: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or not value:
+        raise SourceLockError(f"{field} must be a non-empty object")
+    casefolded_names: set[str] = set()
+    for name, identity in value.items():
+        member_field = f"{field}.{name}"
+        if (
+            not isinstance(name, str)
+            or not name
+            or Path(name).name != name
+            or "\\" in name
+            or name.casefold() in casefolded_names
+        ):
+            raise SourceLockError(f"{field} contains an unsafe or duplicate member name")
+        casefolded_names.add(name.casefold())
+        if not isinstance(identity, dict) or set(identity) != {"bytes", "sha256"}:
+            raise SourceLockError(
+                f"{member_field} must contain exactly bytes and sha256"
+            )
+        byte_size = identity.get("bytes")
+        if not isinstance(byte_size, int) or isinstance(byte_size, bool) or byte_size < 1:
+            raise SourceLockError(f"{member_field}.bytes must be a positive integer")
+        sha256 = identity.get("sha256")
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise SourceLockError(
+                f"{member_field}.sha256 must be lowercase hexadecimal"
+            )
+
+
 def load_source_lock(path: str | Path) -> SourceLock:
     lock_path = Path(path).resolve()
     try:
@@ -54,6 +89,7 @@ def load_source_lock(path: str | Path) -> SourceLock:
     if not isinstance(document, dict) or document.get("format") != "opencepgeo-source-lock-v1":
         raise SourceLockError("unsupported or missing source lock format")
     release = _require_string(document.get("release"), "release")
+    _require_string(document.get("publication_gate"), "publication_gate")
     raw_sources = document.get("sources")
     if not isinstance(raw_sources, list) or not raw_sources:
         raise SourceLockError("sources must be a non-empty list")
@@ -85,6 +121,14 @@ def load_source_lock(path: str | Path) -> SourceLock:
             raise SourceLockError(f"{prefix}.sha256 must be lowercase hexadecimal")
 
         acquisition = _require_string(raw.get("acquisition"), f"{prefix}.acquisition")
+        for metadata_field in (
+            "retrieved_at",
+            "attribution",
+            "license_status",
+            "terms_status",
+        ):
+            _require_string(raw.get(metadata_field), f"{prefix}.{metadata_field}")
+        _validate_member_identities(raw.get("members"), f"{prefix}.members")
         url = raw.get("url")
         local_path = raw.get("local_path")
         if acquisition == "https":
@@ -181,7 +225,9 @@ def verify_sources(
     return [verify_file(input_root / source.filename, source) for source in selected]
 
 
-def _repository_source(lock: SourceLock, source: LockedSource) -> Path:
+def repository_source_path(lock: SourceLock, source: LockedSource) -> Path:
+    if source.acquisition != "repository":
+        raise SourceLockError(f"source is not repository-acquired: {source.source_id}")
     repository_root = lock.path.parent.parent.resolve()
     candidate = (repository_root / (source.local_path or "")).resolve()
     if candidate != repository_root and repository_root not in candidate.parents:
@@ -190,7 +236,7 @@ def _repository_source(lock: SourceLock, source: LockedSource) -> Path:
 
 
 def _copy_repository_source(lock: SourceLock, source: LockedSource, output) -> None:
-    candidate = _repository_source(lock, source)
+    candidate = repository_source_path(lock, source)
     verify_file(candidate, source)
     with candidate.open("rb") as handle:
         shutil.copyfileobj(handle, output, length=1024 * 1024)
@@ -203,7 +249,36 @@ def _download_source(source: LockedSource, output, timeout: float) -> None:
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            shutil.copyfileobj(response, output, length=1024 * 1024)
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    advertised_size = int(content_length)
+                except ValueError as exc:
+                    raise SourceLockError(
+                        f"invalid Content-Length for {source.source_id}"
+                    ) from exc
+                if advertised_size != source.byte_size:
+                    raise SourceLockError(
+                        f"download size mismatch for {source.source_id}: "
+                        f"expected {source.byte_size}, server advertised {advertised_size}"
+                    )
+            remaining = source.byte_size
+            while remaining:
+                chunk = response.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise SourceLockError(
+                        f"download ended early for {source.source_id}: "
+                        f"expected {source.byte_size} bytes"
+                    )
+                output.write(chunk)
+                remaining -= len(chunk)
+            if response.read(1):
+                raise SourceLockError(
+                    f"download exceeds locked size for {source.source_id}: "
+                    f"expected {source.byte_size} bytes"
+                )
+    except SourceLockError:
+        raise
     except OSError as exc:
         raise SourceLockError(f"download failed for {source.source_id}: {exc}") from exc
 

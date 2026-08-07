@@ -13,6 +13,7 @@ class EnrichmentConfig:
     max_prefix_radius_km: float
     max_observed_radius_km: float
     max_osm_radius_km: float
+    max_osm_municipality_distance_km: float
     outlier_min_samples: int
     outlier_mad_multiplier: float
     outlier_floor_km: float
@@ -28,6 +29,7 @@ class EnrichmentConfig:
             self.max_prefix_radius_km,
             self.max_observed_radius_km,
             self.max_osm_radius_km,
+            self.max_osm_municipality_distance_km,
             self.outlier_mad_multiplier,
             self.outlier_floor_km,
         )
@@ -80,6 +82,10 @@ def load_enrichment_config(
         ),
         max_osm_radius_km=_number(
             thresholds.get("max_osm_radius_km"), "max_osm_radius_km"
+        ),
+        max_osm_municipality_distance_km=_number(
+            thresholds.get("max_osm_municipality_distance_km"),
+            "max_osm_municipality_distance_km",
         ),
         outlier_min_samples=_integer(
             thresholds.get("outlier_min_samples"), "outlier_min_samples"
