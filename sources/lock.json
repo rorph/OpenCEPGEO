@@ -1,0 +1,141 @@
+{
+  "format": "opencepgeo-source-lock-v1",
+  "release": "2026.2.1-rc2",
+  "generated_at": "2026-08-07T00:35:39Z",
+  "publication_gate": "blocked-opencep-dne-rights-review",
+  "sources": [
+    {
+      "id": "opencep-2.0.1",
+      "role": "CEP and address corpus",
+      "required": true,
+      "version": "2.0.1",
+      "filename": "opencep-2.0.1-v1.zip",
+      "bytes": 342302994,
+      "sha256": "cffa33783b7cb2bec060acd499eb8356698918efdc79238708aac46fcce9e62d",
+      "acquisition": "https",
+      "url": "https://github.com/SeuAliado/OpenCEP/releases/download/2.0.1/v1.zip",
+      "release_url": "https://github.com/SeuAliado/OpenCEP/releases/tag/2.0.1",
+      "published_at": "2024-07-08T23:56:56Z",
+      "asset_updated_at": "2024-07-08T23:56:04Z",
+      "retrieved_at": "2026-08-07T00:35:39Z",
+      "retrieved_on": "a7x.l",
+      "attribution": "OpenCEP / SeuAliado",
+      "license_url": "https://github.com/SeuAliado/OpenCEP/blob/d0f37beb65c1aa54141e17c528f1a434e9a18de4/LICENSE",
+      "license_status": "repository-mit-database-rights-unclear",
+      "terms_status": "blocks-public-source-and-derived-data-release",
+      "corrections_source_id": "opencep-2.0.1-corrections",
+      "notes": "The repository license does not explicitly license the released database or document its DNE extraction rights."
+    },
+    {
+      "id": "opencep-2.0.1-corrections",
+      "role": "Audited OpenCEP member correction set",
+      "required": true,
+      "version": "2026.2.1-rc2",
+      "filename": "opencep-2.0.1-corrections.json",
+      "bytes": 485,
+      "sha256": "861bccbf3cc6e7b2949147e754ec8e34b8b0a5c1d37f71a0b9ea2d8c5d1b6b5c",
+      "acquisition": "repository",
+      "local_path": "sources/opencep-2.0.1-corrections.json",
+      "retrieved_at": "2026-08-07T00:35:39Z",
+      "attribution": "OpenCEPGeo audited correction",
+      "license_status": "mit-project-metadata",
+      "terms_status": "project-authored-correction-metadata",
+      "notes": "The correction is part of the immutable input boundary and is applied only when member, original value, and raw member SHA-256 match."
+    },
+    {
+      "id": "ibge-localidades-2022-2025-11-19",
+      "role": "Official municipality and locality reference points",
+      "required": true,
+      "version": "Censo Demografico 2022; file published 2025-11-19",
+      "filename": "ibge-localidades-2022-gpkg.zip",
+      "bytes": 6477540,
+      "sha256": "1d96d5f0b379972a506d4b18c3696af974fbe59f8f6680557cb3a6dd38a0eb57",
+      "acquisition": "https",
+      "url": "https://geoftp.ibge.gov.br/organizacao_do_territorio/estrutura_territorial/localidades/Localidades_do_Brasil/2022/Localidades_Brasil_gpkg.zip",
+      "product_url": "https://www.ibge.gov.br/geociencias/organizacao-do-territorio/estrutura-territorial/27385-localidades.html",
+      "upstream_modified_at": "2025-11-19T16:12:00-03:00",
+      "retrieved_at": "2026-08-07T00:35:39Z",
+      "retrieved_on": "a7x.l",
+      "attribution": "IBGE, Censo Demografico 2022: Localidades do Brasil",
+      "license_status": "public-download-attribution-required-license-text-not-embedded",
+      "terms_status": "private-build-allowed-publication-requires-attribution-review"
+    },
+    {
+      "id": "ibge-municipios-2024",
+      "role": "Official municipality polygons for OSM evidence containment",
+      "required": false,
+      "version": "Malha Municipal 2024; file published 2025-04-29",
+      "filename": "BR_Municipios_2024.zip",
+      "bytes": 208153231,
+      "sha256": "bb78a8dc60a8320231f6eda79a8c89f68f0e22f0d81608dc051ee505fc72a1e5",
+      "acquisition": "https",
+      "url": "https://geoftp.ibge.gov.br/organizacao_do_territorio/malhas_territoriais/malhas_municipais/municipio_2024/Brasil/BR_Municipios_2024.zip",
+      "product_url": "https://www.ibge.gov.br/geociencias/organizacao-do-territorio/malhas-territoriais/15774-malhas.html",
+      "upstream_modified_at": "2025-04-29T10:01:00-03:00",
+      "retrieved_at": "2026-08-07T03:02:28Z",
+      "retrieved_on": "a7x.l",
+      "attribution": "IBGE, Malha Municipal 2024",
+      "license_status": "public-download-attribution-required-license-text-not-embedded",
+      "terms_status": "private-build-allowed-publication-requires-attribution-review",
+      "members": {
+        "BR_Municipios_2024.cpg": {
+          "bytes": 5,
+          "sha256": "3ad3031f5503a4404af825262ee8232cc04d4ea6683d42c5dd0a2f2a27ac9824"
+        },
+        "BR_Municipios_2024.dbf": {
+          "bytes": 2865036,
+          "sha256": "0257f680ff908c0c1d32856d73631bb0d5d0f95d87fb964f7364659f8599d59e"
+        },
+        "BR_Municipios_2024.prj": {
+          "bytes": 151,
+          "sha256": "b7fe68a2eb827ea974a1a995a73676e095a366b383a10a66c7498300d1c58153"
+        },
+        "BR_Municipios_2024.shp": {
+          "bytes": 286858448,
+          "sha256": "679c58184f7dd37597be9da8af622c22c845e30fbfb05ce316d8b73529b8cfe4"
+        },
+        "BR_Municipios_2024.shx": {
+          "bytes": 44684,
+          "sha256": "b4966edef1fb93bb6a6e89789836cb85c603784ee3a0e654a8184d8cef5f3742"
+        }
+      },
+      "notes": "Required whenever checksum-locked OSM postcode evidence is selected; used only for independent point-in-target-municipality containment."
+    },
+    {
+      "id": "first-party-observations-example",
+      "role": "Synthetic first-party observation contract fixture",
+      "required": false,
+      "version": "repository-2026.2.1-rc2",
+      "filename": "first-party-observations-example.csv",
+      "bytes": 138,
+      "sha256": "9de3b84511e4778af1e0be0737ff2b2733ecf0be52c8d1340abb4fc139948c7b",
+      "acquisition": "repository",
+      "local_path": "examples/observations.csv",
+      "retrieved_at": "2026-08-07T00:35:39Z",
+      "attribution": "OpenCEPGeo synthetic fixture",
+      "license_status": "mit-synthetic-data",
+      "terms_status": "example-only-not-production-observations",
+      "notes": "A production observation file must receive its own immutable lock entry and collection-rights review."
+    },
+    {
+      "id": "geofabrik-brazil-260806",
+      "role": "Optional pinned local OSM enrichment extract",
+      "required": false,
+      "version": "brazil-260806",
+      "filename": "geofabrik-brazil-260806.osm.pbf",
+      "bytes": 2068474612,
+      "sha256": "27fff6bf35856655cd6979dba64e3a9b67b3e7594d3c66a6d56fa401fde4050b",
+      "acquisition": "https",
+      "url": "https://download.geofabrik.de/south-america/brazil-260806.osm.pbf",
+      "product_url": "https://download.geofabrik.de/south-america/brazil.html",
+      "upstream_modified_at": "2026-08-06T22:50:55Z",
+      "retrieved_at": "2026-08-07T00:35:39Z",
+      "retrieved_on": "a7x.l",
+      "attribution": "OpenStreetMap contributors; extract by Geofabrik GmbH",
+      "license_url": "https://www.openstreetmap.org/copyright",
+      "license_status": "odbl-1.0",
+      "terms_status": "optional-publication-requires-odbl-compliance",
+      "notes": "Use only with local tooling. Public Nominatim is prohibited as a bulk source."
+    }
+  ]
+}

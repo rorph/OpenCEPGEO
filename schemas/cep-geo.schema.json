@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rorph/OpenCEPGEO/schemas/cep-geo.schema.json",
+  "title": "OpenCEPGeo lookup result",
+  "type": "object",
+  "required": ["cep", "prefix", "street", "complement", "unit", "neighborhood", "city", "uf", "state", "region", "ibge", "dataset_version", "geo"],
+  "properties": {
+    "cep": {"type": "string", "pattern": "^[0-9]{8}$"},
+    "prefix": {"type": "string", "pattern": "^[0-9]{5}$"},
+    "street": {"type": ["string", "null"]},
+    "complement": {"type": ["string", "null"]},
+    "unit": {"type": ["string", "null"]},
+    "neighborhood": {"type": ["string", "null"]},
+    "city": {"type": "string", "minLength": 1},
+    "uf": {"type": "string", "pattern": "^[A-Z]{2}$"},
+    "state": {"type": ["string", "null"]},
+    "region": {"type": ["string", "null"]},
+    "ibge": {"type": "string", "pattern": "^[0-9]{7}$"},
+    "dataset_version": {"type": "string", "minLength": 1},
+    "geo": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["type", "coordinates", "precision", "method", "evidence_count", "evidence_radius_km", "source", "evidence_digest"],
+          "properties": {
+            "type": {"const": "Point"},
+            "coordinates": {
+              "type": "array",
+              "prefixItems": [
+                {"type": "number", "minimum": -180, "maximum": 180},
+                {"type": "number", "minimum": -90, "maximum": 90}
+              ],
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "precision": {
+              "enum": ["observed_cep", "osm_postcode", "observed_cep_prefix", "municipality"]
+            },
+            "method": {"type": "string", "minLength": 1},
+            "evidence_count": {"type": "integer", "minimum": 1},
+            "evidence_radius_km": {"type": "number", "minimum": 0},
+            "source": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1, "maxLength": 64},
+              "minItems": 1,
+              "maxItems": 16,
+              "uniqueItems": true
+            },
+            "evidence_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}
