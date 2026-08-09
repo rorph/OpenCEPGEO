@@ -85,6 +85,21 @@ opencepgeo build \
 opencepgeo lookup --database out/opencepgeo.sqlite 01001000
 ```
 
+## Internal lookup service
+
+Consumers that should not mount SQLite directly can run the data-agnostic
+internal service image over one immutable, read-only artifact:
+
+```bash
+docker build -t opencepgeo:local .
+```
+
+The image requires `OPENCEPGEO_DATABASE_SHA256` and
+`OPENCEPGEO_DATASET_VERSION` before it becomes ready. Do not publish a host
+port. The complete read-only mount, internal-network, replacement, and rollback
+contract is in the [service runbook](docs/service-runbook.md); the boundary
+decision is recorded in [ADR 0002](docs/adr/0002-internal-lookup-service.md).
+
 The production first-party observations CSV has this contract:
 
 ```csv
