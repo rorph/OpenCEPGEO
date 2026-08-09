@@ -43,18 +43,31 @@ retrieval, attribution, license-status, and terms-status metadata.
 
 ## Redistribution decision
 
+### Private internal self-hosting decision (2026-08-08)
+
+[OpenCEP's repository](https://github.com/SeuAliado/OpenCEP) is MIT licensed and
+its project documentation explicitly describes the corpus and application as
+100% open source and suitable for self-hosting. That upstream evidence supports
+this specific private internal OpenCEPGeo service deployment and private
+reproduction of its checksum-locked RC2 artifact. The decision does not alter
+the immutable historical inputs in `sources/lock.json`, does not authorize a
+public dataset release, and does not remove any OpenCEP, IBGE, or OpenStreetMap
+attribution.
+
+Public redistribution remains a separate gate for the combined generated
+artifact: ordinary release review, selected OSM ODbL attribution/share-alike
+assessment, and IBGE provenance and attribution remain mandatory.
+
 - The OpenCEPGeo implementation is MIT licensed. This says nothing about the
   database rights in downloaded or generated data.
-- OpenCEP publishes a release archive and applies MIT to its repository, but
-  it does not state a separate database license or disclose a reproducible
-  extraction chain from the Correios DNE. Correios markets DNE as a commercial
-  database. Public redistribution of OpenCEP input bytes or derived CEP rows
-  is therefore **blocked pending written rights review**.
+- OpenCEP publishes its release archive in the MIT-licensed repository and
+  documents open-source self-hosting. Preserve OpenCEP / SeuAliado attribution
+  in internal deployments and any reviewed release.
 - IBGE describes the download directory as public and must be attributed as
   `Censo Demografico 2022: Localidades do Brasil`, including its edition and
   source URL. The separately locked `Malha Municipal 2024` polygon archive is
   used only for OSM evidence containment and requires the same provenance and
-  attribution discipline. Neither clears the OpenCEP-derived artifact gate.
+  attribution discipline for the combined generated artifact.
 - First-party observations require their own documented collection authority
   and sharing scope. Production inputs must include a stable source-owned
   `evidence_id` for every row; reused identities with different data fail
@@ -65,6 +78,7 @@ retrieval, attribution, license-status, and terms-status metadata.
 - Public Nominatim is prohibited as a bulk source. Enrichment may use only a
   pinned local extract and local tooling.
 
-The build can be reproduced privately while this gate is closed. No generated
-database, manifest, or source archive may be published until the OpenCEP/DNE
-question and any selected OSM obligations are explicitly cleared.
+Private internal reproduction and self-hosting are cleared by the dated
+decision above. Publishing a generated database, manifest, or source archive
+requires ordinary release review and completion of all selected OSM ODbL and
+IBGE attribution/compliance obligations.

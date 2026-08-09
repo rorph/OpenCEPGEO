@@ -3,11 +3,15 @@
 OpenCEPGeo's source code is MIT licensed. Input datasets and generated database
 artifacts may be governed by different terms.
 
+Private internal deployment decision, 2026-08-08: OpenCEP's MIT repository and
+its 100%-open-source/self-hosting documentation support private internal
+self-hosting of this service and its checksum-locked RC2 artifact. This decision
+does not authorize public redistribution and does not change the immutable RC2
+source lock.
+
 - OpenCEP publishes a downloadable CEP corpus from its GitHub releases and
-  labels its repository MIT. It does not provide a separate, explicit database
-  license or a reproducible upstream extraction process.
-- Correios describes the Diretório Nacional de Endereços (DNE) as its official
-  commercial address database and asserts rights over that database.
+  labels its repository MIT, with documentation for open-source self-hosting.
+  Preserve OpenCEP / SeuAliado attribution.
 - IBGE publishes Localidades do Brasil as public geoscience data. Preserve the
   dataset name, edition, source URL, and attribution in generated releases.
 - OpenStreetMap explicit-postcode refinements are governed by ODbL and require
@@ -15,7 +19,8 @@ artifacts may be governed by different terms.
   assessment. Public Nominatim must never be bulk queried.
 
 The machine-readable input boundary is `sources/lock.json`; its checksums and
-rights-status fields are evidence, not a license grant. Public redistribution
-of source archives or generated CEP data is blocked until the OpenCEP/DNE
-rights question is explicitly cleared. See
+rights-status fields are historical build evidence and are unchanged by the
+private deployment decision. Public redistribution of the combined generated
+artifact remains subject to ordinary release review plus applicable ODbL and
+IBGE attribution/compliance requirements. See
 [`docs/source-provenance.md`](docs/source-provenance.md) for the release gate.

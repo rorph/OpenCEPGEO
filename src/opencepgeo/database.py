@@ -7,10 +7,17 @@ import sqlite3
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from statistics import median
 
 from .boundaries import select_municipality_observations
 from .config import EnrichmentConfig, load_enrichment_config
-from .estimator import CentroidEstimator, normalize_cep, normalize_ibge
+from .estimator import (
+    CentroidEstimator,
+    haversine_km,
+    normalize_cep,
+    normalize_ibge,
+)
+from .model import Point
 from .provenance import builder_identity
 from .quality import enforce_build_quality, load_quality_policy
 from .source_lock import (
@@ -28,6 +35,7 @@ from .sources import (
 )
 
 _SCHEMA_VERSION = "opencepgeo-sqlite-v4"
+SCHEMA_VERSION = _SCHEMA_VERSION
 _EXPORT_FORMAT = "opencepgeo-jsonl-v4"
 _MANIFEST_FORMAT = "opencepgeo-build-manifest-v2"
 
@@ -124,6 +132,11 @@ _ROW_COLUMNS = (
     "evidence_digest",
     "dataset_version",
 )
+LOOKUP_COLUMNS = _ROW_COLUMNS
+_PREFIX_EXACT_PRECISIONS = frozenset({"observed_cep", "osm_postcode"})
+_PREFIX_MIN_EVIDENCE = 3
+_PREFIX_MAX_EVIDENCE_RADIUS_KM = 10.0
+_PREFIX_MAX_MEMBERS = 1000
 
 
 def _text(value: object) -> str | None:
@@ -774,7 +787,7 @@ def lookup(database_path: str | Path, cep: object) -> dict[str, object] | None:
     if cep8 is None:
         return None
     connection = sqlite3.connect(
-        f"file:{Path(database_path).resolve()}?mode=ro", uri=True
+        f"file:{Path(database_path).resolve()}?mode=ro&immutable=1", uri=True
     )
     connection.row_factory = sqlite3.Row
     try:
@@ -790,3 +803,120 @@ def lookup(database_path: str | Path, cep: object) -> dict[str, object] | None:
     finally:
         connection.close()
     return _contract_row(row) if row is not None else None
+
+
+def lookup_prefix(
+    database_path: str | Path, cep: object
+) -> dict[str, object] | None:
+    cep8 = normalize_cep(cep)
+    if cep8 is None:
+        return None
+    connection = sqlite3.connect(
+        f"file:{Path(database_path).resolve()}?mode=ro&immutable=1", uri=True
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        metadata = dict(connection.execute("SELECT key, value FROM metadata"))
+        if metadata.get("format") != _SCHEMA_VERSION:
+            raise ValueError(
+                f"incompatible SQLite schema: {metadata.get('format')!r}; "
+                f"expected {_SCHEMA_VERSION!r}"
+            )
+        target = connection.execute(
+            "SELECT prefix, ibge, dataset_version FROM cep_geo WHERE cep = ?",
+            (cep8,),
+        ).fetchone()
+        if target is None:
+            return None
+        members = connection.execute(
+            """
+            SELECT cep, latitude, longitude, precision, geo_source, evidence_digest
+            FROM cep_geo
+            WHERE prefix = ? AND ibge = ? AND dataset_version = ?
+            ORDER BY cep
+            LIMIT ?
+            """,
+            (
+                target["prefix"],
+                target["ibge"],
+                target["dataset_version"],
+                _PREFIX_MAX_MEMBERS + 1,
+            ),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    if len(members) > _PREFIX_MAX_MEMBERS:
+        raise ValueError("same-prefix/same-IBGE membership exceeds 1000 CEPs")
+    member_ceps = [row["cep"] for row in members]
+    candidates = [
+        row
+        for row in members
+        if row["cep"] != cep8
+        and row["precision"] in _PREFIX_EXACT_PRECISIONS
+        and row["latitude"] is not None
+        and row["longitude"] is not None
+    ]
+    geo: dict[str, object] | None = None
+    if len(candidates) >= _PREFIX_MIN_EVIDENCE:
+        latitude = median(float(row["latitude"]) for row in candidates)
+        longitude = median(float(row["longitude"]) for row in candidates)
+        center = Point(latitude, longitude, "prefix-center")
+        radius = max(
+            haversine_km(
+                center,
+                Point(
+                    float(row["latitude"]),
+                    float(row["longitude"]),
+                    row["cep"],
+                ),
+            )
+            for row in candidates
+        )
+        if radius <= _PREFIX_MAX_EVIDENCE_RADIUS_KM:
+            source_lists = [json.loads(row["geo_source"]) for row in candidates]
+            if not all(
+                isinstance(values, list)
+                and all(isinstance(source, str) for source in values)
+                for values in source_lists
+            ):
+                raise ValueError("prefix member sources are invalid")
+            sources = sorted({source for values in source_lists for source in values})
+            evidence = [
+                (
+                    row["cep"],
+                    row["precision"],
+                    float(row["latitude"]).hex(),
+                    float(row["longitude"]).hex(),
+                    row["evidence_digest"],
+                )
+                for row in candidates
+            ]
+            payload = json.dumps(evidence, separators=(",", ":")).encode("utf-8")
+            if (
+                1 <= len(sources) <= 16
+                and all(
+                    isinstance(source, str)
+                    and 1 <= len(source.encode("utf-8")) <= 64
+                    for source in sources
+                )
+            ):
+                geo = {
+                    "type": "Point",
+                    "coordinates": [longitude, latitude],
+                    "precision": "observed_cep_prefix",
+                    "method": "bounded_same_ibge_prefix_median",
+                    "evidence_count": len(candidates),
+                    "evidence_radius_km": round(radius, 3),
+                    "source": sources,
+                    "evidence_digest": (
+                        "sha256:" + hashlib.sha256(payload).hexdigest()
+                    ),
+                }
+    return {
+        "prefix": target["prefix"],
+        "ibge": target["ibge"],
+        "dataset_version": target["dataset_version"],
+        "member_ceps": member_ceps,
+        "geo": geo,
+    }
