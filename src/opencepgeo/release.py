@@ -244,6 +244,9 @@ def _attribution_tokens(build_manifest: Mapping[str, object]) -> list[str]:
     configuration = build_manifest.get("configuration")
     if isinstance(configuration, dict) and configuration.get("osm_observations"):
         tokens.add("OpenStreetMap")
+    inputs = build_manifest.get("inputs")
+    if isinstance(inputs, dict) and isinstance(inputs.get("normalized_refresh"), dict):
+        tokens.update(("Correios", "OpenCEP"))
     return sorted(tokens)
 
 

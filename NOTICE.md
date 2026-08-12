@@ -12,6 +12,9 @@ source lock.
 - OpenCEP publishes a downloadable CEP corpus from its GitHub releases and
   labels its repository MIT, with documentation for open-source self-hosting.
   Preserve OpenCEP / SeuAliado attribution.
+- Correios DNEC refresh snapshots remain Correios source data. Preserve
+  Correios attribution and the snapshot publication/provenance record; a
+  refresh candidate does not itself authorize public redistribution.
 - IBGE publishes Localidades do Brasil as public geoscience data. Preserve the
   dataset name, edition, source URL, and attribution in generated releases.
 - OpenStreetMap explicit-postcode refinements are governed by ODbL and require

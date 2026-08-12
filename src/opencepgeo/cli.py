@@ -6,7 +6,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from .database import build_database, lookup
+from .database import build_database, build_database_from_normalized, lookup
 from .osm import PBFError, extract_postcode_nodes
 from .quality import (
     build_quality_report,
@@ -54,6 +54,27 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--export", help="canonical CEP-sorted JSONL output")
     build.add_argument("--manifest", help="deterministic build manifest")
     build.add_argument("--force", action="store_true")
+
+    normalized_build = commands.add_parser(
+        "build-from-normalized",
+        help="build SQLite from a checksum-bound Correios refresh candidate",
+    )
+    normalized_build.add_argument("--normalized", required=True)
+    normalized_build.add_argument("--normalized-output", required=True)
+    normalized_build.add_argument("--refresh-manifest", required=True)
+    normalized_build.add_argument("--refresh-quality", required=True)
+    normalized_build.add_argument("--refresh-diff", required=True)
+    normalized_build.add_argument("--inherited-release", required=True)
+    normalized_build.add_argument("--current-release-contract", required=True)
+    normalized_build.add_argument("--source-lock", required=True)
+    normalized_build.add_argument("--ibge", required=True)
+    normalized_build.add_argument("--osm-observations", required=True)
+    normalized_build.add_argument("--municipality-boundaries", required=True)
+    normalized_build.add_argument("--config", default="config/enrichment-v1.json")
+    normalized_build.add_argument("--quality-config", default="config/quality-v1.json")
+    normalized_build.add_argument("--output", required=True)
+    normalized_build.add_argument("--manifest", required=True)
+    normalized_build.add_argument("--force", action="store_true")
 
     query = commands.add_parser("lookup", help="look up one CEP in a local artifact")
     query.add_argument("--database", required=True)
@@ -220,6 +241,32 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"error": str(exc)}), file=sys.stderr)
             return 2
         print(json.dumps(result, sort_keys=True))
+        return 0
+
+    if args.command == "build-from-normalized":
+        try:
+            stats = build_database_from_normalized(
+                normalized_path=args.normalized,
+                normalized_output_path=args.normalized_output,
+                refresh_manifest_path=args.refresh_manifest,
+                refresh_quality_path=args.refresh_quality,
+                refresh_diff_path=args.refresh_diff,
+                inherited_release_path=args.inherited_release,
+                current_release_contract_path=args.current_release_contract,
+                source_lock_path=args.source_lock,
+                ibge_path=args.ibge,
+                osm_observations_path=args.osm_observations,
+                municipality_boundaries_path=args.municipality_boundaries,
+                enrichment_config_path=args.config,
+                quality_config_path=args.quality_config,
+                output_path=args.output,
+                manifest_path=args.manifest,
+                force=args.force,
+            )
+        except (OSError, RuntimeError, sqlite3.DatabaseError, ValueError) as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 2
+        print(json.dumps(stats, sort_keys=True))
         return 0
 
     if args.command == "build":

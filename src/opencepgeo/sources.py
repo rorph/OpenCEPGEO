@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -346,3 +347,100 @@ def load_ibge_municipality_points(path: str | Path) -> dict[str, Point]:
         ibge: reference.point
         for ibge, reference in load_ibge_municipality_references(path).items()
     }
+
+
+def load_ibge_administrative_locality_references(
+    path: str | Path, municipality_codes: set[str]
+) -> dict[str, MunicipalityReference]:
+    """Read the official Fernando de Noronha administrative locality fallback."""
+    requested = {normalize_ibge(code) for code in municipality_codes}
+    if None in requested:
+        raise ValueError("administrative locality request has an invalid IBGE code")
+    if not requested:
+        return {}
+    with _ibge_geopackage(path) as geopackage:
+        connection = sqlite3.connect(f"file:{geopackage.resolve()}?mode=ro", uri=True)
+        try:
+            tables = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT table_name FROM gpkg_contents WHERE data_type = 'features'"
+                )
+            ]
+            required = {
+                "CD_MUN",
+                "CT_LOCALIDADE",
+                "LAT_LOCALIDADE",
+                "LONG_LOCALIDADE",
+            }
+            table = None
+            for candidate in tables:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        f"PRAGMA table_info({_quote_identifier(candidate)})"
+                    )
+                }
+                if required.issubset(columns):
+                    table = candidate
+                    break
+            if table is None:
+                raise ValueError("IBGE GeoPackage has no compatible Localidades layer")
+            placeholders = ",".join("?" for _ in requested)
+            query = f"""
+                SELECT CD_MUN, CT_LOCALIDADE, LAT_LOCALIDADE, LONG_LOCALIDADE
+                  FROM {_quote_identifier(table)}
+                 WHERE CD_MUN IN ({placeholders})
+                   AND LAT_LOCALIDADE IS NOT NULL
+                   AND LONG_LOCALIDADE IS NOT NULL
+                 ORDER BY CD_MUN, CT_LOCALIDADE, LAT_LOCALIDADE, LONG_LOCALIDADE
+            """
+            points: dict[str, list[Point]] = defaultdict(list)
+            for raw_ibge, category, latitude, longitude in connection.execute(
+                query, tuple(sorted(requested))
+            ):
+                ibge = normalize_ibge(raw_ibge)
+                if ibge is None:
+                    raise ValueError(
+                        f"invalid IBGE municipality code in GeoPackage: {raw_ibge!r}"
+                    )
+                latitude = float(latitude)
+                longitude = float(longitude)
+                if (
+                    not math.isfinite(latitude)
+                    or not math.isfinite(longitude)
+                    or not -34.0 <= latitude <= 5.5
+                    or not -74.0 <= longitude <= -28.0
+                ):
+                    raise ValueError(
+                        f"invalid administrative locality coordinates for IBGE {ibge}"
+                    )
+                if str(category) != "Distrito Estadual de Fernando de Noronha":
+                    continue
+                points[ibge].append(
+                    Point(
+                        latitude=latitude,
+                        longitude=longitude,
+                        source="ibge-localidades-administrative",
+                    )
+                )
+            references: dict[str, MunicipalityReference] = {}
+            for ibge, localities in points.items():
+                centroid = Point(
+                    latitude=sum(point.latitude for point in localities)
+                    / len(localities),
+                    longitude=sum(point.longitude for point in localities)
+                    / len(localities),
+                    source="ibge-localidades-administrative",
+                )
+                references[ibge] = MunicipalityReference(
+                    point=centroid,
+                    evidence_count=len(localities),
+                    evidence_radius_km=round(
+                        max(haversine_km(centroid, point) for point in localities), 3
+                    ),
+                    evidence_digest=evidence_digest(localities),
+                )
+            return references
+        finally:
+            connection.close()
