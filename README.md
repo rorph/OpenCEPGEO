@@ -43,6 +43,10 @@ error or confidence bound.
   municipality before they can influence an artifact.
 - Optional observations CSV: trusted CEP points from first-party datasets such
   as already-geocoded stores.
+- An offline Correios DNEC refresh candidate may replace the OpenCEP ingestion
+  step only through `build-from-normalized`. Its canonical JSONL v4 bytes and
+  refresh manifest are both checksum-bound; the refresh tool's candidate
+  SQLite is never promoted.
 
 OpenCEPGeo does not redistribute these inputs. Review [NOTICE.md](NOTICE.md)
 before publishing derived artifacts.
@@ -84,6 +88,36 @@ opencepgeo build \
 
 opencepgeo lookup --database out/opencepgeo.sqlite 01001000
 ```
+
+To build from an independently reviewed Correios refresh candidate while
+preserving every existing point and filling only null geography from the
+pinned IBGE locality input:
+
+```bash
+opencepgeo build-from-normalized \
+  --normalized data/candidate/opencepgeo-2026.2.1-rc3.jsonl \
+  --normalized-output out/opencepgeo-2026.2.1-rc3.jsonl \
+  --refresh-manifest data/candidate/manifest.json \
+  --refresh-quality data/candidate/quality-report.json \
+  --refresh-diff data/candidate/diff.jsonl \
+  --inherited-release data/releases/2026.2.1-rc2 \
+  --current-release-contract data/contracts/opencepgeo-v4-2026.2.1-rc2.json \
+  --source-lock sources/lock.json \
+  --ibge data/locked/ibge-localidades-2022-gpkg.zip \
+  --municipality-boundaries data/locked/BR_Municipios_2024.zip \
+  --osm-observations data/derived/osm-postcodes.csv \
+  --config config/enrichment-v1.json \
+  --quality-config config/quality-v1.json \
+  --output out/opencepgeo-2026.2.1-rc3.sqlite \
+  --manifest out/build-manifest.json
+```
+
+This path is fail-closed: it requires the refresh status and version contract,
+the exact manifest-bound JSONL basename/size/SHA-256, canonical sorted unique
+rows, every v4 field and bounded line, all supporting input hashes, the normal
+quality gate, SQLite integrity, and a second streaming semantic comparison.
+The PIN-207 JSONL remains immutable input evidence. The generated JSONL is a
+distinct release artifact and is byte-for-byte equivalent to the final SQLite.
 
 ## Internal lookup service
 
@@ -134,7 +168,7 @@ lookup is represented as:
     "source": ["first-party-store"],
     "evidence_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   },
-  "dataset_version": "2026.2.1-rc2"
+  "dataset_version": "2026.2.1-rc3"
 }
 ```
 

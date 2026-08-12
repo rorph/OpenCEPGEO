@@ -41,6 +41,15 @@ count and reject inconsistent `Content-Length`, early EOF, and trailing bytes.
 Every source, including repository-resident corrections, must record non-empty
 retrieval, attribution, license-status, and terms-status metadata.
 
+A Correios DNEC refresh is an offline, independently reviewable provenance
+step. Promotion requires the refresh manifest and its exact canonical JSONL v4
+artifact; the refresh candidate SQLite is not trusted or reused. The resulting
+build manifest retains the current OpenCEPGeo lineage, the Correios snapshot
+identities/publication marker, and all supporting source-lock/configuration
+digests. Correios attribution and rights review are additive to the existing
+OpenCEP, IBGE, and OpenStreetMap obligations. A technically valid refresh does
+not clear the publication gate.
+
 ## Redistribution decision
 
 ### Private internal self-hosting decision (2026-08-08)
@@ -63,6 +72,9 @@ assessment, and IBGE provenance and attribution remain mandatory.
 - OpenCEP publishes its release archive in the MIT-licensed repository and
   documents open-source self-hosting. Preserve OpenCEP / SeuAliado attribution
   in internal deployments and any reviewed release.
+- Correios DNEC snapshots used for offline refresh remain Correios source data.
+  Preserve Correios attribution and the exact captured publication/provenance
+  record; review redistribution rights for the refreshed combined database.
 - IBGE describes the download directory as public and must be attributed as
   `Censo Demografico 2022: Localidades do Brasil`, including its edition and
   source URL. The separately locked `Malha Municipal 2024` polygon archive is
