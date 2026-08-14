@@ -1823,9 +1823,10 @@ def _fill_normalized_geo(
             "evidence_digest": reference.evidence_digest,
         },
     }
-    if osm_estimator is not None and (
-        upgraded := _osm_postcode_upgrade(filled, osm_estimator)
-    ) is not None:
+    if (
+        osm_estimator is not None
+        and (upgraded := _osm_postcode_upgrade(filled, osm_estimator)) is not None
+    ):
         counters["geo_upgraded_osm_postcode"] += 1
         return upgraded
     counters[counter] += 1
@@ -2852,7 +2853,9 @@ def build_database_from_normalized(
                 selection.boundary_target_municipality
             ) + len(selection.outside_target_municipality) + len(
                 selection.unknown_cep
-            ) != len(upgrade_observations):
+            ) != len(
+                upgrade_observations
+            ):
                 raise ValueError(
                     "OSM upgrade boundary selection counts are inconsistent"
                 )

@@ -172,11 +172,7 @@ def _correios_snapshot(directory: Path, row_count: int = 3) -> dict[str, object]
     """
     manifest_path = directory / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return {
-        key: value
-        for key, value in manifest.items()
-        if key != "artifacts"
-    } | {
+    return {key: value for key, value in manifest.items() if key != "artifacts"} | {
         "directory": directory.name,
         "manifest_sha256": _sha256(manifest_path),
     }
@@ -451,9 +447,7 @@ def _write_fixture(
                 "current_rows_retained": True,
             },
             "located_rows": sum(1 for row in fixture_rows if row["geo"] is not None),
-            "unresolved_rows": sum(
-                1 for row in fixture_rows if row["geo"] is None
-            ),
+            "unresolved_rows": sum(1 for row in fixture_rows if row["geo"] is None),
             "precision_counts": _candidate_precision_counts(fixture_rows),
             "geography_action_counts": _geography_action_counts(len(fixture_rows)),
         },
@@ -892,9 +886,7 @@ def _write_fixture(
                 "current_rows_retained": True,
             },
             "located_rows": sum(1 for row in fixture_rows if row["geo"] is not None),
-            "unresolved_rows": sum(
-                1 for row in fixture_rows if row["geo"] is None
-            ),
+            "unresolved_rows": sum(1 for row in fixture_rows if row["geo"] is None),
             "precision_counts": _candidate_precision_counts(fixture_rows),
             "geography_action_counts": _geography_action_counts(len(fixture_rows)),
         },
@@ -2454,9 +2446,7 @@ class OsmUpgradeTests(unittest.TestCase):
             }
             inherited_release = arguments["inherited_release_path"]
             build_manifest_path = inherited_release / "build-manifest.json"
-            build_document = json.loads(
-                build_manifest_path.read_text(encoding="utf-8")
-            )
+            build_document = json.loads(build_manifest_path.read_text(encoding="utf-8"))
             build_document["configuration"]["osm_observations"] = osm_record
             _write_json(build_manifest_path, build_document)
             release_manifest_path = inherited_release / "manifest.json"
@@ -2472,8 +2462,8 @@ class OsmUpgradeTests(unittest.TestCase):
             release_document = json.loads(
                 release_manifest_path.read_text(encoding="utf-8")
             )
-            release_document["quality_attestation"]["build_manifest_sha256"] = (
-                _sha256(build_manifest_path)
+            release_document["quality_attestation"]["build_manifest_sha256"] = _sha256(
+                build_manifest_path
             )
             _write_json(release_manifest_path, release_document)
             contract_path = arguments["current_release_contract_path"]
@@ -2483,8 +2473,8 @@ class OsmUpgradeTests(unittest.TestCase):
                 "sha256": _sha256(build_manifest_path),
                 "format": "opencepgeo-build-manifest-v2",
             }
-            contract_document["approved_release"]["release_manifest_sha256"] = (
-                _sha256(release_manifest_path)
+            contract_document["approved_release"]["release_manifest_sha256"] = _sha256(
+                release_manifest_path
             )
             _write_json(contract_path, contract_document)
             refresh_quality = arguments["refresh_quality_path"]
@@ -2514,25 +2504,25 @@ class OsmUpgradeTests(unittest.TestCase):
                 "bytes": build_manifest_path.stat().st_size,
                 "sha256": _sha256(build_manifest_path),
             }
-            refresh_quality_document["inherited_base_release"]["contract"] = (
-                inherited_identity
-            )
-            refresh_quality_document["inherited_base_release"]["release_manifest"] = (
-                release_identity
-            )
-            refresh_quality_document["inherited_base_release"]["build_manifest"] = (
-                build_identity
-            )
+            refresh_quality_document["inherited_base_release"][
+                "contract"
+            ] = inherited_identity
+            refresh_quality_document["inherited_base_release"][
+                "release_manifest"
+            ] = release_identity
+            refresh_quality_document["inherited_base_release"][
+                "build_manifest"
+            ] = build_identity
             _write_json(refresh_quality, refresh_quality_document)
             refresh_manifest = arguments["refresh_manifest_path"]
             refresh_document = json.loads(refresh_manifest.read_text(encoding="utf-8"))
             refresh_document["inherited_base_release"]["contract"] = inherited_identity
-            refresh_document["inherited_base_release"]["release_manifest"] = (
-                release_identity
-            )
-            refresh_document["inherited_base_release"]["build_manifest"] = (
-                build_identity
-            )
+            refresh_document["inherited_base_release"][
+                "release_manifest"
+            ] = release_identity
+            refresh_document["inherited_base_release"][
+                "build_manifest"
+            ] = build_identity
             refresh_document["inputs"]["current_release_contract"] = inherited_contract
             refresh_document["artifacts"]["quality-report.json"] = {
                 "format": "opencepgeo-correios-refresh-quality-v1",

@@ -57,7 +57,9 @@ class SourceLockTests(unittest.TestCase):
             fetched = fetch_sources(lock_path, destination)
             self.assertEqual((destination / "fixture-copy.bin").read_bytes(), payload)
             self.assertEqual(fetched[0]["id"], "fixture")
-            self.assertEqual(verify_sources(lock_path, destination)[0]["bytes"], len(payload))
+            self.assertEqual(
+                verify_sources(lock_path, destination)[0]["bytes"], len(payload)
+            )
 
     def test_missing_required_input_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
