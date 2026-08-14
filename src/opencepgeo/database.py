@@ -12,6 +12,7 @@ import stat
 import tempfile
 from collections import Counter
 from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 
@@ -28,6 +29,14 @@ from .estimator import (
 from .model import Observation, Point
 from .provenance import builder_identity
 from .quality import enforce_build_quality, load_quality_policy
+from .refresh_policy import (
+    SnapshotVerification,
+    enforce_refresh_policy,
+    load_refresh_policy,
+    parse_instant,
+    validate_operator_override,
+    verify_correios_snapshot,
+)
 from .source_lock import (
     LockedSource,
     SourceLock,
@@ -775,10 +784,24 @@ def _iter_normalized_rows(
 
 
 def _stream_refresh_diff(
-    path: Path, expected: dict[str, object]
-) -> tuple[dict[str, int], dict[str, int]]:
+    path: Path,
+    expected: dict[str, object],
+    *,
+    capture_date_utc: datetime | None = None,
+) -> tuple[dict[str, int], dict[str, int], int]:
+    """Stream the refresh diff, counting classifications, actions and
+    past-expiry retentions.
+
+    ``valid_until`` is parsed as a real ISO date/datetime. When the snapshot's
+    UTC capture date is supplied, a CEP retained as ``missing_from_source``
+    whose ``valid_until`` already lies in the past is counted as an expired
+    retention: the refresh tool must exclude rows expired at capture time, so
+    the builder refuses to keep them (honouring ``valid_until`` rather than
+    silently discarding it).
+    """
     classification_counts: Counter[str] = Counter()
     action_counts: Counter[str] = Counter()
+    expired_retained = 0
     digest = hashlib.sha256()
     byte_size = 0
     previous_cep: str | None = None
@@ -797,6 +820,7 @@ def _stream_refresh_diff(
             classification = value.get("classification")
             action = value.get("geography_action")
             changed_fields = value.get("changed_fields")
+            valid_until = value.get("valid_until")
             if (
                 not isinstance(cep, str)
                 or _CEP_RE.fullmatch(cep) is None
@@ -819,12 +843,27 @@ def _stream_refresh_diff(
                         (value.get("previous_cep"), _CEP_RE),
                     )
                 )
-                or (
-                    value.get("valid_until") is not None
-                    and not isinstance(value.get("valid_until"), str)
-                )
             ):
                 raise ValueError(f"refresh diff line {rows} is invalid")
+            # valid_until must be a real calendar date or datetime, never an
+            # arbitrary string: retention decisions are made from this value.
+            if valid_until is not None:
+                if not isinstance(valid_until, str):
+                    raise ValueError(
+                        f"refresh diff line {rows} has a non-string valid_until"
+                    )
+                expiry = _parse_valid_until(valid_until)
+                if expiry is None:
+                    raise ValueError(
+                        f"refresh diff line {rows} has a malformed valid_until: "
+                        f"{valid_until!r}"
+                    )
+                if (
+                    capture_date_utc is not None
+                    and classification == "missing_from_source"
+                    and expiry < capture_date_utc
+                ):
+                    expired_retained += 1
             previous_cep = cep
             classification_counts[str(classification)] += 1
             action_counts[str(action)] += 1
@@ -837,7 +876,31 @@ def _stream_refresh_diff(
     return (
         {key: classification_counts[key] for key in _CLASSIFICATION_KEYS},
         {key: action_counts[key] for key in _GEOGRAPHY_ACTION_KEYS},
+        expired_retained,
     )
+
+
+def _parse_valid_until(value: str) -> datetime | None:
+    """Parse a Correios ``valid_until`` (date or datetime, naive) to UTC.
+
+    Correios publishes date-only expiries under the recorded semantics
+    ``active_through_date_using_utc_capture_date``; naive datetimes use the
+    same DNEC local-time interpretation. Returns None when unparseable.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        # Interpret at the documented fixed DNEC offset (Brazil has had no DST
+        # since 2019), matching the naive dnec_published_at semantics.
+        parsed = parsed.replace(tzinfo=timezone(timedelta(minutes=-180)))
+    return parsed.astimezone(timezone.utc)
 
 
 def _normalized_sql_row(row: dict[str, object]) -> tuple[object, ...]:
@@ -898,7 +961,12 @@ def _validate_identity(
 
 
 def _load_refresh_manifest(
-    path: Path, normalized: Path, quality_path: Path, diff_path: Path
+    path: Path,
+    normalized: Path,
+    quality_path: Path,
+    diff_path: Path,
+    *,
+    capture_date_utc: datetime | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, object],
@@ -906,6 +974,7 @@ def _load_refresh_manifest(
     dict[str, object],
     dict[str, object],
     dict[str, object],
+    dict[str, int],
 ]:
     manifest_record = _regular_file_identity(path, "refresh manifest")
     if manifest_record["bytes"] > _MAX_REFRESH_MANIFEST_BYTES:
@@ -1275,7 +1344,9 @@ def _load_refresh_manifest(
         or sum(action_counts.values()) != candidate_rows
     ):
         raise ValueError("refresh quality report disagrees with refresh manifest")
-    diff_classifications, diff_actions = _stream_refresh_diff(diff_path, diff_record)
+    diff_classifications, diff_actions, _expired = _stream_refresh_diff(
+        diff_path, diff_record, capture_date_utc=capture_date_utc
+    )
     if diff_classifications != classifications or diff_actions != action_counts:
         raise ValueError("refresh diff counts disagree with refresh quality")
     quality_record["format"] = "opencepgeo-correios-refresh-quality-v1"
@@ -1287,6 +1358,7 @@ def _load_refresh_manifest(
         quality_record,
         diff_record,
         quality,
+        classifications,
     )
 
 
@@ -2249,9 +2321,14 @@ def build_database_from_normalized(
     municipality_boundaries_path: str | Path,
     enrichment_config_path: str | Path,
     quality_config_path: str | Path,
+    correios_snapshot_path: str | Path,
+    refresh_policy_path: str | Path = "config/refresh-policy-v1.json",
+    refresh_profile: str = "weekly",
+    refresh_override_budget: str | None = None,
     output_path: str | Path,
     manifest_path: str | Path,
     force: bool = False,
+    build_instant: datetime | None = None,
 ) -> dict[str, object]:
     normalized = Path(normalized_path)
     normalized_output = Path(normalized_output_path)
@@ -2267,9 +2344,13 @@ def build_database_from_normalized(
     municipality_boundaries = Path(municipality_boundaries_path)
     enrichment_config = Path(enrichment_config_path)
     quality_config = Path(quality_config_path)
+    correios_snapshot_dir = Path(correios_snapshot_path)
+    refresh_policy_file = Path(refresh_policy_path)
     output = Path(output_path)
     manifest = Path(manifest_path)
     targets = (output, normalized_output, manifest)
+    if refresh_override_budget is not None:
+        refresh_override_budget = validate_operator_override(refresh_override_budget)
 
     for target in targets:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2369,9 +2450,103 @@ def build_database_from_normalized(
             refresh_quality_record,
             refresh_diff_record,
             refresh_quality_document,
+            classifications_from_manifest,
         ) = _load_refresh_manifest(
             refresh_manifest, normalized, refresh_quality, refresh_diff
         )
+
+        correios_claim = refresh["inputs"]["correios_snapshot"]
+        if correios_snapshot_dir.name != correios_claim.get("directory"):
+            raise ValueError(
+                "Correios snapshot directory basename must match the refresh "
+                f"manifest claim: {correios_snapshot_dir.name!r} != "
+                f"{correios_claim.get('directory')!r}"
+            )
+        snapshot_staging = snapshots / "correios-snapshot" / correios_snapshot_dir.name
+        snapshot_staging.mkdir(parents=True)
+        for name in ("manifest.json", "addresses.jsonl", "raw-addresses.jsonl"):
+            _snapshot_regular_file(
+                correios_snapshot_dir / name,
+                snapshot_staging / name,
+                f"Correios snapshot file {name}",
+            )
+        snapshot_verification = verify_correios_snapshot(snapshot_staging)
+        if (
+            snapshot_verification.manifest_identity["sha256"]
+            != correios_claim.get("manifest_sha256")
+            or snapshot_verification.addresses_identity["sha256"]
+            != correios_claim.get("addresses_sha256")
+            or snapshot_verification.raw_addresses_identity["sha256"]
+            != correios_claim.get("raw_addresses_sha256")
+            or snapshot_verification.addresses_identity["bytes"]
+            != correios_claim.get("addresses_bytes")
+            or snapshot_verification.raw_addresses_identity["bytes"]
+            != correios_claim.get("raw_addresses_bytes")
+        ):
+            raise ValueError(
+                "recomputed Correios snapshot hashes disagree with the refresh "
+                "manifest claims — the snapshot bytes are not the bytes the "
+                "candidate was built from"
+            )
+        for count_key in (
+            "record_count",
+            "raw_record_count",
+            "duplicate_record_count",
+            "duplicate_group_count",
+        ):
+            claim = correios_claim.get(count_key)
+            derived = getattr(snapshot_verification, count_key)
+            if claim != derived:
+                raise ValueError(
+                    f"recomputed Correios snapshot {count_key} ({derived}) "
+                    f"disagrees with the refresh manifest claim ({claim})"
+                )
+        for map_key in (
+            "cep_type_counts",
+            "validity_counts",
+            "ibge_resolution_counts",
+        ):
+            if correios_claim.get(map_key) != getattr(snapshot_verification, map_key):
+                raise ValueError(
+                    f"recomputed Correios snapshot {map_key} disagree with the "
+                    "refresh manifest claims"
+                )
+        snapshot_manifest_claim = snapshot_verification.verified_manifest_document
+        snapshot_bound = {
+            key: snapshot_manifest_claim[key]
+            for key in (
+                "dnec_published_at",
+                "dnec_timezone_semantics",
+                "captured_at",
+                "date_only_expiry_semantics",
+                "first_cep",
+                "last_cep",
+                "page_count",
+                "page_size",
+                "source_total_elements",
+            )
+        }
+        for key, value in snapshot_bound.items():
+            if correios_claim.get(key) != value:
+                raise ValueError(
+                    f"refresh manifest Correios claim {key} disagrees with the "
+                    "verified snapshot manifest"
+                )
+
+        # valid_until / tombstone semantics: re-stream the verified diff against
+        # the capture instant and refuse rows retained past their expiry.
+        captured_instant = parse_instant(correios_claim.get("captured_at"))
+        expired_retained = _stream_refresh_diff(
+            refresh_diff,
+            refresh_diff_record,
+            capture_date_utc=captured_instant,
+        )[2]
+        if expired_retained:
+            raise ValueError(
+                f"refresh diff retains {expired_retained} CEP(s) whose valid_until "
+                "already expired before the snapshot capture date — expired rows "
+                "must be excluded rather than retained"
+            )
 
         pinned_snapshots = snapshots / "pinned"
         for source, label in (
@@ -2382,6 +2557,7 @@ def build_database_from_normalized(
             (municipality_boundaries, "municipality boundaries"),
             (enrichment_config, "enrichment config"),
             (quality_config, "quality config"),
+            (refresh_policy_file, "refresh policy"),
         ):
             _snapshot_regular_file(source, pinned_snapshots / source.name, label)
         contract_snapshot = snapshots / "contract" / current_release_contract.name
@@ -2464,10 +2640,56 @@ def build_database_from_normalized(
         municipality_boundaries = pinned_snapshots / municipality_boundaries.name
         enrichment_config = pinned_snapshots / enrichment_config.name
         quality_config = pinned_snapshots / quality_config.name
+        refresh_policy_file = pinned_snapshots / refresh_policy_file.name
         current_release_contract = contract_snapshot
         inherited_release = inherited_snapshot
 
         dataset_version = str(refresh["dataset_version"])
+        inherited_base = refresh["inherited_base_release"]
+        inherited_dataset_version = str(inherited_base["dataset_version"])
+
+        # The inherited release's own build manifest records the Correios
+        # snapshot it was built from (absent for the pre-Correios RC2 base —
+        # first adoption). Re-read it from the verified inherited snapshot to
+        # anchor ordering/replay gates, then (re)enforce the refresh policy now
+        # that the inherited lineage is fully verified.
+        inherited_build_manifest_name = str(
+            inherited_base["build_manifest"]["filename"]
+        )
+        inherited_build_document = _read_bound_json(
+            inherited_release / inherited_build_manifest_name,
+            inherited_base["build_manifest"],
+            "inherited build manifest",
+            _MANIFEST_FORMAT,
+        )
+        inherited_refresh_inputs = (
+            inherited_build_document.get("inputs", {}).get("normalized_refresh")
+            if isinstance(inherited_build_document, dict)
+            else None
+        )
+        inherited_snapshot_claim: dict[str, object] | None = None
+        if isinstance(inherited_refresh_inputs, dict):
+            claim = inherited_refresh_inputs.get("inputs")
+            if isinstance(claim, dict) and isinstance(
+                claim.get("correios_snapshot"), dict
+            ):
+                inherited_snapshot_claim = dict(claim["correios_snapshot"])
+        refresh_policy_snapshot = load_refresh_policy(refresh_policy_file)
+        gate_report = enforce_refresh_policy(
+            policy=refresh_policy_snapshot,
+            profile=refresh_profile,
+            correios_claim=correios_claim,
+            snapshot_verification=snapshot_verification,
+            dataset_version=dataset_version,
+            classification_counts=classifications_from_manifest,
+            inherited_dataset_version=inherited_dataset_version,
+            inherited_snapshot=inherited_snapshot_claim,
+            inherited_record_count=int(
+                refresh["inputs"]["current_opencepgeo"]["record_count"]
+            ),
+            build_instant=build_instant or datetime.now(timezone.utc),
+            override_reason=refresh_override_budget,
+        )
         (
             lock,
             lock_metadata,
@@ -2521,7 +2743,6 @@ def build_database_from_normalized(
         )
         verify_file(ibge, _locked_source(lock, ibge))
 
-        inherited_base = refresh["inherited_base_release"]
         inherited_normalized = inherited_release / str(
             inherited_base["normalized_artifact"]["filename"]
         )
@@ -2555,6 +2776,8 @@ def build_database_from_normalized(
         os.close(parent_descriptor)
         raise
 
+    refresh_policy_version = refresh_policy_snapshot.version
+    refresh_policy_sha256 = refresh_policy_snapshot.sha256
     identity = builder_identity()
     counters = {
         "geo_inherited": 0,
@@ -2586,6 +2809,13 @@ def build_database_from_normalized(
             ("enrichment_config_sha256", str(enrichment_record["sha256"])),
             ("quality_config_sha256", quality_policy.sha256),
             ("quality_version", quality_policy.version),
+            ("refresh_policy_version", refresh_policy_version),
+            ("refresh_policy_sha256", refresh_policy_sha256),
+            ("refresh_profile", refresh_profile),
+            # Source-true freshness for the service layer (PIN-220 /readyz):
+            # normalized UTC instants from the *verified* Correios snapshot.
+            ("dnec_published_at", gate_report.dnec_published_at_utc),
+            ("captured_at", gate_report.captured_at_utc),
         ]
         connection.executemany(
             "INSERT INTO metadata (key, value) VALUES (?, ?)", metadata
@@ -2731,6 +2961,25 @@ def build_database_from_normalized(
                     "classification_counts": refresh["classification_counts"],
                     "artifacts": refresh["artifacts"],
                     "inherited_base_release": refresh["inherited_base_release"],
+                    "refresh_policy": {
+                        "format": "opencepgeo-refresh-policy-v1",
+                        "version": refresh_policy_version,
+                        "sha256": refresh_policy_sha256,
+                        "profile": refresh_profile,
+                        "correios_snapshot_verified": {
+                            # Recomputed from the supplied snapshot bytes, not
+                            # read from the refresh manifest's claims.
+                            "manifest": snapshot_verification.manifest_identity,
+                            "addresses": snapshot_verification.addresses_identity,
+                            "raw_addresses": snapshot_verification.raw_addresses_identity,
+                            "record_count": snapshot_verification.record_count,
+                            "raw_record_count": snapshot_verification.raw_record_count,
+                            "duplicate_record_count": (
+                                snapshot_verification.duplicate_record_count
+                            ),
+                        },
+                        "gate_report": gate_report.as_dict(),
+                    },
                     "geography_derivation": {
                         "policy": "preserve-non-null-fill-null-from-pinned-ibge-v1",
                         "candidate_located": candidate_located,

@@ -72,6 +72,30 @@ def _parser() -> argparse.ArgumentParser:
     normalized_build.add_argument("--municipality-boundaries", required=True)
     normalized_build.add_argument("--config", default="config/enrichment-v1.json")
     normalized_build.add_argument("--quality-config", default="config/quality-v1.json")
+    normalized_build.add_argument(
+        "--correios-snapshot",
+        required=True,
+        help="Correios crawl snapshot directory (manifest.json, addresses.jsonl, "
+        "raw-addresses.jsonl); hashes are recomputed and counts re-derived",
+    )
+    normalized_build.add_argument(
+        "--refresh-policy",
+        default="config/refresh-policy-v1.json",
+        help="versioned refresh policy (freshness, ordering, budgets, retention)",
+    )
+    normalized_build.add_argument(
+        "--refresh-profile",
+        default="weekly",
+        choices=("weekly", "catch-up"),
+        help="budget/freshness profile: weekly drift or an authorised catch-up jump",
+    )
+    normalized_build.add_argument(
+        "--refresh-override-budget",
+        default=None,
+        metavar="REASON",
+        help="explicit recorded operator override for budget breaches only "
+        "(freshness/ordering/replay/hash breaches are never overridable)",
+    )
     normalized_build.add_argument("--output", required=True)
     normalized_build.add_argument("--manifest", required=True)
     normalized_build.add_argument("--force", action="store_true")
@@ -259,6 +283,10 @@ def main(argv: list[str] | None = None) -> int:
                 municipality_boundaries_path=args.municipality_boundaries,
                 enrichment_config_path=args.config,
                 quality_config_path=args.quality_config,
+                correios_snapshot_path=args.correios_snapshot,
+                refresh_policy_path=args.refresh_policy,
+                refresh_profile=args.refresh_profile,
+                refresh_override_budget=args.refresh_override_budget,
                 output_path=args.output,
                 manifest_path=args.manifest,
                 force=args.force,
