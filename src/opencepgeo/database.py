@@ -25,7 +25,7 @@ from .estimator import (
     normalize_cep,
     normalize_ibge,
 )
-from .model import Point
+from .model import Observation, Point
 from .provenance import builder_identity
 from .quality import enforce_build_quality, load_quality_policy
 from .source_lock import (
@@ -140,6 +140,12 @@ _CLASSIFICATION_KEYS = frozenset(
     }
 )
 _REFRESH_PRECISION_KEYS = frozenset({"municipality", "osm_postcode"})
+# PIN-216: every non-null candidate coordinate must be either byte-identical to
+# the inherited release (already proven when that release built) or reproduced
+# exactly by recomputing from the pinned IBGE/OSM evidence. Those inputs are
+# hash-locked to the inherited lineage, so a point that is neither preserved nor
+# reproduced has been moved off its evidence and fails the build.
+_COORDINATE_EVIDENCE_POLICY = "preserve-or-reproduce-from-pinned-ibge-osm-v1"
 _GEOGRAPHY_ACTION_KEYS = frozenset(
     {
         "assigned_municipality",
@@ -1739,6 +1745,237 @@ def _fill_normalized_geo(
     }
 
 
+def _percentile_km(ordered: list[float], fraction: float) -> float:
+    if not ordered:
+        return 0.0
+    rank = max(1, math.ceil(fraction * len(ordered)))
+    return ordered[min(rank, len(ordered)) - 1]
+
+
+def _displacement_summary(values: list[float]) -> dict[str, object]:
+    if not values:
+        return {"count": 0, "max_km": 0.0, "mean_km": 0.0, "p50_km": 0.0, "p95_km": 0.0}
+    ordered = sorted(values)
+    return {
+        "count": len(ordered),
+        "max_km": round(ordered[-1], 6),
+        "mean_km": round(math.fsum(ordered) / len(ordered), 6),
+        "p50_km": round(_percentile_km(ordered, 0.50), 6),
+        "p95_km": round(_percentile_km(ordered, 0.95), 6),
+    }
+
+
+def _classify_osm_polygon(
+    targets: list[tuple[str, str, float, float]],
+    *,
+    municipality_boundaries_path: Path,
+    boundary_members: dict[str, object] | None,
+    max_outside_fraction: float,
+) -> dict[str, object]:
+    summary: dict[str, object] = {
+        "checked": len(targets),
+        "interior": 0,
+        "boundary": 0,
+        "outside": 0,
+        "unknown": 0,
+        "outside_fraction": 0.0,
+        "maximum_outside_fraction": max_outside_fraction,
+    }
+    if not targets:
+        return summary
+    observations = [
+        Observation(
+            cep=cep,
+            point=Point(latitude, longitude, f"coordinate-validation:node/{index}"),
+        )
+        for index, (cep, _ibge, longitude, latitude) in enumerate(targets)
+    ]
+    selection = select_municipality_observations(
+        municipality_boundaries_path,
+        observations,
+        {cep: ibge for cep, ibge, _lon, _lat in targets},
+        expected_members=boundary_members,
+    )
+    summary["interior"] = len(selection.interior_target_municipality)
+    summary["boundary"] = len(selection.boundary_target_municipality)
+    summary["outside"] = len(selection.outside_target_municipality)
+    summary["unknown"] = len(selection.unknown_cep)
+    known = int(summary["checked"]) - int(summary["unknown"])
+    summary["outside_fraction"] = (
+        round(int(summary["outside"]) / known, 8) if known else 0.0
+    )
+    if summary["outside_fraction"] > max_outside_fraction:
+        raise ValueError(
+            "osm_postcode coordinates fall outside their municipality polygon: "
+            f"{summary['outside']}/{known} (fraction {summary['outside_fraction']} "
+            f"exceeds the permitted {max_outside_fraction})"
+        )
+    return summary
+
+
+def _coordinate_evidence_estimator(
+    municipalities: dict[str, object],
+    osm_observations_path: Path,
+    enrichment: EnrichmentConfig,
+) -> CentroidEstimator:
+    # Mirrors the production build's estimator (no first-party observations); its
+    # osm_postcode / municipality tiers deterministically reproduce the candidate
+    # coordinates from the same pinned inputs that built the inherited release.
+    return CentroidEstimator(
+        (),
+        municipalities,
+        osm_observations=load_osm_observations(osm_observations_path),
+        min_prefix_samples=enrichment.min_prefix_samples,
+        max_prefix_radius_km=enrichment.max_prefix_radius_km,
+        max_observed_radius_km=enrichment.max_observed_radius_km,
+        max_osm_radius_km=enrichment.max_osm_radius_km,
+        max_osm_municipality_distance_km=enrichment.max_osm_municipality_distance_km,
+        outlier_min_samples=enrichment.outlier_min_samples,
+        outlier_mad_multiplier=enrichment.outlier_mad_multiplier,
+        outlier_floor_km=enrichment.outlier_floor_km,
+    )
+
+
+def _validate_candidate_geography_evidence(
+    *,
+    candidate_path: Path,
+    candidate_record: dict[str, object],
+    candidate_dataset_version: str,
+    inherited_path: Path,
+    inherited_record: dict[str, object],
+    inherited_dataset_version: str,
+    osm_observations_path: Path,
+    municipality_boundaries_path: Path,
+    boundary_members: dict[str, object] | None,
+    municipalities: dict[str, object],
+    administrative: dict[str, object],
+    enrichment: EnrichmentConfig,
+    max_outside_polygon_fraction: float,
+) -> dict[str, object]:
+    """Prove every non-null candidate coordinate against the pinned evidence.
+
+    Streams the inherited release alongside the candidate (both CEP-ordered) and
+    accepts a coordinate only when it is byte-identical to the inherited release
+    (already proven when that release built) or reproduced from the pinned
+    IBGE/OSM inputs for its declared precision tier: a ``municipality`` point
+    must sit exactly on the pinned IBGE city/administrative reference for its
+    IBGE code, and an ``osm_postcode`` (or first-party) point must equal the
+    production estimator's recomputed point for the same tier. Any coordinate
+    that is neither preserved nor reproduced has been moved off its evidence and
+    fails the build. osm_postcode points are additionally checked for
+    municipality polygon containment, gated on the fraction the quality policy
+    tolerates. Returns a displacement/suspicious-change summary for the manifest.
+    """
+    estimator: CentroidEstimator | None = None
+    inherited_rows = _iter_normalized_rows(
+        inherited_path, inherited_dataset_version, inherited_record
+    )
+    inherited_current = next(inherited_rows, None)
+
+    non_null = 0
+    preserved = 0
+    reproduced = 0
+    reproduced_new = 0
+    reproduced_changed = 0
+    displacements: list[float] = []
+    suspicious: list[str] = []
+    osm_targets: list[tuple[str, str, float, float]] = []
+
+    for row in _iter_normalized_rows(
+        candidate_path, candidate_dataset_version, candidate_record
+    ):
+        cep = str(row["cep"])
+        while inherited_current is not None and str(inherited_current["cep"]) < cep:
+            inherited_current = next(inherited_rows, None)
+        inherited_geo = None
+        if inherited_current is not None and str(inherited_current["cep"]) == cep:
+            inherited_geo = inherited_current["geo"]
+
+        geo = row["geo"]
+        if geo is None:
+            # Null candidate geography is filled deterministically from the pinned
+            # IBGE reference by _fill_normalized_geo; evidence-derived by
+            # construction, so it needs no separate proof here.
+            continue
+        non_null += 1
+        if inherited_geo is not None and geo == inherited_geo:
+            preserved += 1
+            continue
+
+        ibge = str(row["ibge"])
+        precision = geo.get("precision")
+        coordinates = geo["coordinates"]
+        longitude, latitude = float(coordinates[0]), float(coordinates[1])
+        if precision == "municipality":
+            # A municipality point is a copy of the pinned IBGE city or
+            # administrative-locality reference; it must sit exactly on that
+            # reference for its IBGE code, independent of any recompute tier.
+            reference = municipalities.get(ibge) or administrative.get(ibge)
+            reproduced_ok = reference is not None and (
+                reference.point.longitude == longitude
+                and reference.point.latitude == latitude
+            )
+        elif precision in ("osm_postcode", "observed_cep", "observed_cep_prefix"):
+            # Higher-precision points are recomputed by the production estimator;
+            # the recomputed tier and point must match the stored coordinate.
+            if estimator is None:
+                estimator = _coordinate_evidence_estimator(
+                    municipalities, osm_observations_path, enrichment
+                )
+            estimate = estimator.estimate(cep, ibge)
+            reproduced_ok = (
+                estimate is not None
+                and estimate.precision == precision
+                and estimate.longitude == longitude
+                and estimate.latitude == latitude
+            )
+        else:
+            reproduced_ok = False
+        if not reproduced_ok:
+            suspicious.append(f"{cep} [{precision}]")
+            continue
+        reproduced += 1
+        if inherited_geo is None:
+            reproduced_new += 1
+        else:
+            reproduced_changed += 1
+            previous = inherited_geo["coordinates"]
+            displacements.append(
+                haversine_km(
+                    Point(float(previous[1]), float(previous[0]), "inherited"),
+                    Point(latitude, longitude, "candidate"),
+                )
+            )
+        if precision == "osm_postcode":
+            osm_targets.append((cep, ibge, longitude, latitude))
+
+    if suspicious:
+        preview = ", ".join(suspicious[:5])
+        raise ValueError(
+            f"{len(suspicious)} candidate coordinate(s) are neither preserved from "
+            "the inherited release nor reproduced from the pinned IBGE/OSM "
+            f"evidence: {preview}"
+        )
+
+    polygon = _classify_osm_polygon(
+        osm_targets,
+        municipality_boundaries_path=municipality_boundaries_path,
+        boundary_members=boundary_members,
+        max_outside_fraction=max_outside_polygon_fraction,
+    )
+    return {
+        "policy": _COORDINATE_EVIDENCE_POLICY,
+        "non_null_candidate_rows": non_null,
+        "preserved_from_inherited": preserved,
+        "reproduced_from_pinned_evidence": reproduced,
+        "reproduced_new_cep": reproduced_new,
+        "reproduced_changed_cep": reproduced_changed,
+        "suspicious_changes": len(suspicious),
+        "displacement_km": _displacement_summary(displacements),
+        "osm_polygon": polygon,
+    }
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -2283,6 +2520,36 @@ def build_database_from_normalized(
             ibge, unresolved_ibge - set(municipalities)
         )
         verify_file(ibge, _locked_source(lock, ibge))
+
+        inherited_base = refresh["inherited_base_release"]
+        inherited_normalized = inherited_release / str(
+            inherited_base["normalized_artifact"]["filename"]
+        )
+        osm_policy = quality_policy.validation.get("osm_evidence", {})
+        max_outside_fraction = osm_policy.get(
+            "maximum_outside_target_municipality_fraction", 0.0
+        )
+        coordinate_validation = _validate_candidate_geography_evidence(
+            candidate_path=normalized,
+            candidate_record=candidate_record,
+            candidate_dataset_version=dataset_version,
+            inherited_path=inherited_normalized,
+            inherited_record=inherited_base["normalized_artifact"],
+            inherited_dataset_version=str(inherited_base["dataset_version"]),
+            osm_observations_path=osm_observations,
+            municipality_boundaries_path=municipality_boundaries,
+            boundary_members=_locked_source(lock, municipality_boundaries).metadata.get(
+                "members"
+            ),
+            municipalities=municipalities,
+            administrative=administrative,
+            enrichment=enrichment,
+            max_outside_polygon_fraction=(
+                float(max_outside_fraction)
+                if isinstance(max_outside_fraction, (int, float))
+                else 0.0
+            ),
+        )
     except Exception:
         shutil.rmtree(staging_directory, ignore_errors=True)
         os.close(parent_descriptor)
@@ -2475,6 +2742,7 @@ def build_database_from_normalized(
                         ],
                         "unresolved": counters["geo_unresolved"],
                         "nearby_eligible": False,
+                        "coordinate_validation": coordinate_validation,
                     },
                 },
             },
