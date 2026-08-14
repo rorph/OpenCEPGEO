@@ -14,6 +14,7 @@ import time
 import unittest
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -57,6 +58,29 @@ def update_metadata(path: Path, **values: str) -> str:
     connection.commit()
     connection.close()
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def upsert_metadata(path: Path, **values: str) -> str:
+    connection = sqlite3.connect(path)
+    connection.executemany(
+        """
+        INSERT INTO metadata (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        ((key, value) for key, value in values.items()),
+    )
+    connection.commit()
+    connection.close()
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def artifact_mtime_utc(path: Path) -> str:
+    return (
+        datetime.fromtimestamp(path.stat().st_mtime_ns / 1_000_000_000, UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def mutate_city_preserving_size_and_mtime(path: Path) -> os.stat_result:
@@ -338,6 +362,12 @@ class ServiceAPITests(unittest.TestCase):
                 payload["dataset"]["counts"],
                 {"unique_ceps": 6, "located": 5, "unresolved": 1},
             )
+            freshness = payload["dataset"]["freshness"]
+            self.assertIsNone(freshness["dnec_published_at"])
+            self.assertIsNone(freshness["captured_at"])
+            self.assertEqual(freshness["built_at"], artifact_mtime_utc(self.database))
+            self.assertEqual(freshness["age_source"], "built_at")
+            self.assertGreaterEqual(freshness["age_seconds"], 0)
 
             status, payload, _headers = request(port, "/v1/cep/01001-000")
             self.assertEqual(status, 200)
@@ -530,6 +560,75 @@ class ServiceAPITests(unittest.TestCase):
                 self.assertEqual(timed_out, b"")
                 wait_until(lambda: service.server.active_requests == 0)
                 self.assertEqual(request(port, "/healthz")[0], 200)
+
+    def test_readyz_exposes_publication_and_capture_metadata(self):
+        frozen = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
+        self.sha256 = upsert_metadata(
+            self.database,
+            dnec_published_at="2026-08-11T00:00:00Z",
+            captured_at="2026-08-11T01:00:00+00:00",
+            built_at="2026-08-11T02:00:00Z",
+        )
+        with mock.patch("opencepgeo.service._utc_now", return_value=frozen):
+            with RunningService(self.config()) as port:
+                status, payload, _headers = request(port, "/readyz")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(
+            payload["dataset"]["freshness"],
+            {
+                "dnec_published_at": "2026-08-11T00:00:00Z",
+                "captured_at": "2026-08-11T01:00:00Z",
+                "built_at": "2026-08-11T02:00:00Z",
+                "age_seconds": 3 * 24 * 60 * 60 + 11 * 60 * 60,
+                "age_source": "captured_at",
+            },
+        )
+
+    def test_stale_dataset_stays_ready_and_serves_lookups(self):
+        frozen = datetime(2026, 8, 14, 12, 0, tzinfo=UTC)
+        captured = frozen - timedelta(days=9)
+        self.sha256 = upsert_metadata(
+            self.database,
+            captured_at=captured.isoformat().replace("+00:00", "Z"),
+        )
+        with mock.patch("opencepgeo.service._utc_now", return_value=frozen):
+            with RunningService(self.config()) as port:
+                ready_status, ready_payload, _headers = request(port, "/readyz")
+                lookup_status, lookup_payload, _lookup_headers = request(
+                    port, "/v1/cep/01001000"
+                )
+        self.assertEqual(ready_status, 200)
+        self.assertEqual(ready_payload["status"], "ready")
+        freshness = ready_payload["dataset"]["freshness"]
+        self.assertEqual(freshness["captured_at"], "2026-08-05T12:00:00Z")
+        self.assertEqual(freshness["age_seconds"], 9 * 24 * 60 * 60)
+        self.assertEqual(freshness["age_source"], "captured_at")
+        self.assertEqual(lookup_status, 200)
+        self.assertEqual(lookup_payload["status"], "resolved")
+        self.assertEqual(lookup_payload["data"]["cep"], "01001000")
+
+    def test_invalid_freshness_metadata_does_not_fail_readiness(self):
+        self.sha256 = upsert_metadata(
+            self.database,
+            dnec_published_at="not-a-timestamp",
+            captured_at="2026-08-01T00:00:00",
+            built_at="",
+        )
+        with RunningService(self.config()) as port:
+            status, payload, _headers = request(port, "/readyz")
+            lookup_status, _lookup_payload, _lookup_headers = request(
+                port, "/v1/cep/01001000"
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "ready")
+        freshness = payload["dataset"]["freshness"]
+        self.assertIsNone(freshness["dnec_published_at"])
+        self.assertIsNone(freshness["captured_at"])
+        self.assertEqual(freshness["built_at"], artifact_mtime_utc(self.database))
+        self.assertEqual(freshness["age_source"], "built_at")
+        self.assertGreaterEqual(freshness["age_seconds"], 0)
+        self.assertEqual(lookup_status, 200)
 
     def test_unavailable_service_stays_live_and_fails_closed(self):
         missing = self.root / "missing.sqlite"

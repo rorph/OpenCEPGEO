@@ -11,7 +11,7 @@ All responses are JSON with `Cache-Control: no-store`.
 | Endpoint | HTTP | Contract |
 |---|---:|---|
 | `GET /healthz` | 200 | `status: ok`; process liveness only |
-| `GET /readyz` | 200 | `status: ready` plus schema, dataset version, SHA-256, and verified total/located/unresolved counts |
+| `GET /readyz` | 200 | `status: ready` plus schema, dataset version, SHA-256, verified counts, and observational freshness |
 | `GET /readyz` | 503 | `status: unavailable` plus a stable dataset error code |
 | `GET /v1/cep/{cep}` | 200 | `status: resolved` or `unresolved`, with the existing lookup row under `data` |
 | `GET /v1/cep/{cep}` | 400 | `invalid_cep` |
@@ -25,6 +25,32 @@ Dataset error codes are `dataset_checksum_unconfigured`,
 `dataset_checksum_mismatch`, `dataset_schema_incompatible`,
 `dataset_version_mismatch`, `dataset_metadata_invalid`,
 `dataset_count_mismatch`, `dataset_corrupt`, and `dataset_changed`.
+
+`/readyz` never fails on dataset age. A stale but otherwise valid artifact
+stays `status: ready` and continues to serve lookups. Freshness is
+observational so a missed weekly refresh cannot take FarmaBarato CEP
+resolution down.
+
+A ready payload includes this additive `dataset.freshness` object:
+
+```json
+{
+  "dnec_published_at": "2026-08-11T00:00:00Z",
+  "captured_at": "2026-08-11T01:00:00Z",
+  "built_at": "2026-08-11T02:00:00Z",
+  "age_seconds": 298800,
+  "age_source": "captured_at"
+}
+```
+
+Timestamps are timezone-aware ISO-8601 normalized to UTC `Z`. Optional
+SQLite metadata keys `dnec_published_at`, `captured_at`, and `built_at`
+are used when they parse; naive or invalid values become `null` and do
+not revoke readiness. When `built_at` is absent, it is the artifact
+mtime. `age_seconds` is `now` minus the first available of `captured_at`,
+`dnec_published_at`, then `built_at`, and `age_source` names that field.
+Current artifacts that do not persist publication metadata therefore
+report `age_source: built_at` from file mtime.
 
 Access logs contain only client IP, HTTP method, and response status. They never
 record the request path, request line, CEP, query string, or formatter arguments.
@@ -184,6 +210,9 @@ change revokes readiness before data can be returned.
 - `/healthz` fails: process/container failure.
 - `/healthz` passes and `/readyz` returns 503: inspect the stable error code and
   container startup log; do not route lookup traffic to it.
+- `/readyz` is 200 with a large `dataset.freshness.age_seconds`: the artifact
+  is old but still serving. Do not recycle the container for age alone; the
+  weekly refresh worker and its monitor own the alert.
 - `dataset_checksum_mismatch`: verify the mount target and deployment digest.
 - `dataset_schema_incompatible`: select a SQLite v4 artifact or deploy a
   compatible service version.
