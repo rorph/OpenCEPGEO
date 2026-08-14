@@ -29,7 +29,7 @@ from tests.test_pipeline import make_ibge_gpkg
 from tests.test_release import _write_quality_policy, _write_validation_inputs
 
 
-DATASET_VERSION = "fixture-correios-v1"
+DATASET_VERSION = "fixture-dnc-v2"
 
 
 def _sha256(path: Path) -> str:
@@ -162,57 +162,23 @@ def _inherited_release() -> dict[str, object]:
     }
 
 
-def _correios_snapshot(row_count: int = 3) -> dict[str, object]:
+def _correios_snapshot(directory: Path, row_count: int = 3) -> dict[str, object]:
+    """Refresh-manifest Correios claims, fully bound to real snapshot bytes.
+
+    The refresh manifest carries the crawl's scalar claims plus the snapshot
+    manifest's own hash; the crawl manifest's per-file ``artifacts`` records
+    are verified against the bytes by the snapshot verifier and are not part
+    of the refresh-manifest claim set.
+    """
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     return {
-        "addresses_bytes": 2,
-        "addresses_sha256": "2" * 64,
-        "captured_at": "2026-08-11T01:00:00Z",
-        "cep_type_counts": {
-            "1": 0,
-            "2": row_count,
-            "3": 0,
-            "4": 0,
-            "5": 0,
-            "6": 0,
-        },
-        "date_only_expiry_semantics": ("active_through_date_using_utc_capture_date"),
-        "directory": "snapshot",
-        "dnec_published_at": "2026-08-11T00:00:00Z",
-        "dnec_timezone_semantics": "unspecified_by_source",
-        "duplicate_record_count": 0,
-        "duplicate_group_count": 0,
-        "endpoint": "/cep/v2/enderecos",
-        "first_cep": "01001000",
-        "ibge_resolution_counts": {
-            "cep_unidade_operacional": 0,
-            "direct": row_count,
-            "numero_localidade_superior": 0,
-            "numero_localidade_superior+cep_unidade_operacional": 0,
-            "source_link_conflict": 0,
-            "unresolved": 0,
-        },
-        "last_cep": "53990959",
-        "manifest_sha256": "3" * 64,
-        "page_count": 1,
-        "page_size": 2000,
-        "raw_addresses_bytes": 2,
-        "raw_addresses_sha256": "4" * 64,
-        "raw_cep_type_counts": {
-            "1": 0,
-            "2": row_count,
-            "3": 0,
-            "4": 0,
-            "5": 0,
-            "6": 0,
-        },
-        "raw_record_count": row_count,
-        "raw_validity_counts": {"active": row_count, "expired": 0},
-        "record_count": row_count,
-        "schema_version": 3,
-        "sort": ["cep,asc"],
-        "source": "correios-busca-cep-v3",
-        "source_total_elements": row_count,
-        "validity_counts": {"active": row_count, "expired": 0},
+        key: value
+        for key, value in manifest.items()
+        if key != "artifacts"
+    } | {
+        "directory": directory.name,
+        "manifest_sha256": _sha256(manifest_path),
     }
 
 
@@ -258,6 +224,112 @@ def _write_diff(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_bytes(b"".join(_canonical_row(record) for record in records))
 
 
+def _write_correios_snapshot(
+    directory: Path,
+    row_count: int,
+    *,
+    captured_at: str = "2026-08-11T01:30:00Z",
+    dnec_published_at: str = "2026-08-11T00:00:00Z",
+    tamper_manifest: bool = False,
+) -> dict[str, object]:
+    """Write a real crawl-snapshot directory and return its verified claims.
+
+    The addresses/raw files are generated from the fixture rows so every count
+    the refresh manifest claims is reproducible from actual bytes.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    rows = _rows()[:row_count] if row_count <= 3 else _rows()
+    addresses = [
+        {
+            "cep": row["cep"],
+            "cep_type": 2,
+            "city": row["city"],
+            "expired": False,
+            "ibge": row["ibge"],
+            "ibge_resolution": "direct",
+            "neighborhood": row["neighborhood"],
+            "previous_cep": None,
+            "street": row["street"],
+            "uf": row["uf"],
+            "valid_until": None,
+        }
+        for row in rows
+    ]
+    addresses_payload = b"".join(_canonical_row(record) for record in addresses)
+    (directory / "addresses.jsonl").write_bytes(addresses_payload)
+    (directory / "raw-addresses.jsonl").write_bytes(addresses_payload)
+    addresses_sha = hashlib.sha256(addresses_payload).hexdigest()
+    manifest = {
+        "addresses_bytes": len(addresses_payload),
+        "addresses_sha256": addresses_sha,
+        "artifacts": {
+            "canonical_addresses": {
+                "bytes": len(addresses_payload),
+                "format": "correios-cep-canonical-v3",
+                "path": "addresses.jsonl",
+                "records": len(addresses),
+                "sha256": addresses_sha,
+            },
+            "raw_addresses": {
+                "bytes": len(addresses_payload),
+                "format": "correios-busca-cep-v3-normalized-raw-v1",
+                "path": "raw-addresses.jsonl",
+                "records": len(addresses),
+                "sha256": addresses_sha,
+            },
+        },
+        "captured_at": captured_at,
+        "cep_type_counts": {
+            "1": 0,
+            "2": len(addresses),
+            "3": 0,
+            "4": 0,
+            "5": 0,
+            "6": 0,
+        },
+        "date_only_expiry_semantics": "active_through_date_using_utc_capture_date",
+        "dnec_published_at": dnec_published_at,
+        "dnec_timezone_semantics": "unspecified_by_source",
+        "duplicate_group_count": 0,
+        "duplicate_record_count": 0,
+        "endpoint": "/cep/v2/enderecos",
+        "first_cep": addresses[0]["cep"],
+        "ibge_resolution_counts": {
+            "cep_unidade_operacional": 0,
+            "direct": len(addresses),
+            "numero_localidade_superior": 0,
+            "numero_localidade_superior+cep_unidade_operacional": 0,
+            "source_link_conflict": 0,
+            "unresolved": 0,
+        },
+        "last_cep": addresses[-1]["cep"],
+        "page_count": 1,
+        "page_size": 2000,
+        "raw_addresses_bytes": len(addresses_payload),
+        "raw_addresses_sha256": hashlib.sha256(addresses_payload).hexdigest(),
+        "raw_cep_type_counts": {
+            "1": 0,
+            "2": len(addresses),
+            "3": 0,
+            "4": 0,
+            "5": 0,
+            "6": 0,
+        },
+        "raw_record_count": len(addresses),
+        "raw_validity_counts": {"active": len(addresses), "expired": 0},
+        "record_count": len(addresses),
+        "schema_version": 3,
+        "sort": ["cep,asc"],
+        "source": "correios-busca-cep-v3",
+        "source_total_elements": len(addresses),
+        "validity_counts": {"active": len(addresses), "expired": 0},
+    }
+    if tamper_manifest:
+        manifest["record_count"] = manifest["record_count"] + 1
+    _write_json(directory / "manifest.json", manifest)
+    return manifest
+
+
 def _refresh_document(
     normalized: Path,
     quality: Path,
@@ -265,6 +337,7 @@ def _refresh_document(
     dataset_version: str,
     row_count: int,
     *,
+    correios_directory: Path | None = None,
     inherited: dict[str, object] | None = None,
     current: dict[str, object] | None = None,
     contract: dict[str, object] | None = None,
@@ -281,6 +354,7 @@ def _refresh_document(
         key: value for key, value in inherited["contract"].items() if key != "format"
     }
     classifications = _classification_counts(row_count)
+    assert correios_directory is not None, "refresh document requires the snapshot dir"
     return {
         "format": "opencepgeo-correios-refresh-manifest-v1",
         "status": "offline-candidate-not-approved-for-promotion",
@@ -288,7 +362,7 @@ def _refresh_document(
         "inputs": {
             "current_opencepgeo": current,
             "current_release_contract": contract,
-            "correios_snapshot": _correios_snapshot(row_count),
+            "correios_snapshot": _correios_snapshot(correios_directory),
         },
         "candidate_rows": row_count,
         "classification_counts": classifications,
@@ -326,6 +400,8 @@ def _write_fixture(
     source_lock_release: str = "fixture-current-v1",
     current_contract_mutator: Callable[[dict[str, object]], None] | None = None,
     inherited_quality_mutator: Callable[[dict[str, object]], None] | None = None,
+    snapshot_captured_at: str = "2026-08-11T01:30:00Z",
+    snapshot_dnec_published_at: str = "2026-08-11T00:00:00Z",
 ):
     normalized = root / f"opencepgeo-{DATASET_VERSION}.jsonl"
     fixture_rows = rows or _rows()
@@ -333,7 +409,14 @@ def _write_fixture(
     diff = root / "diff.jsonl"
     _write_diff(diff, fixture_rows)
     classifications = _classification_counts(len(fixture_rows))
-    correios = _correios_snapshot(len(fixture_rows))
+    snapshot_directory = root / "snapshot"
+    _write_correios_snapshot(
+        snapshot_directory,
+        len(fixture_rows),
+        captured_at=snapshot_captured_at,
+        dnec_published_at=snapshot_dnec_published_at,
+    )
+    correios = _correios_snapshot(snapshot_directory)
     refresh_quality = root / "quality-report.json"
     _write_json(
         refresh_quality,
@@ -809,10 +892,16 @@ def _write_fixture(
             diff,
             DATASET_VERSION,
             len(fixture_rows),
+            correios_directory=snapshot_directory,
             inherited=inherited,
             current=current,
             contract=contract,
         ),
+    )
+    repository = Path(__file__).resolve().parents[1]
+    refresh_policy = root / "refresh-policy-v1.json"
+    refresh_policy.write_bytes(
+        (repository / "config/refresh-policy-v1.json").read_bytes()
     )
     return {
         "normalized_path": normalized,
@@ -827,6 +916,14 @@ def _write_fixture(
         "municipality_boundaries_path": boundaries,
         "enrichment_config_path": enrichment,
         "quality_config_path": quality,
+        "correios_snapshot_path": snapshot_directory,
+        "refresh_policy_path": refresh_policy,
+        # The fixture inherits a 1-row release and adds 2 rows — a >100% jump
+        # by construction, which no real profile allows. The default fixture
+        # records an explicit operator override (the documented escape hatch);
+        # budget-behaviour tests drive the profiles without it.
+        "refresh_profile": "catch-up",
+        "refresh_override_budget": "fixture: tiny inherited base inflates fractions",
     }
 
 
@@ -1664,6 +1761,8 @@ class NormalizedBuildTests(unittest.TestCase):
             "osm.csv",
             "--municipality-boundaries",
             "boundaries.zip",
+            "--correios-snapshot",
+            "snapshot",
             "--output",
             "output.sqlite",
             "--manifest",
