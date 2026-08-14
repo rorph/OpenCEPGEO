@@ -10,6 +10,7 @@ from opencepgeo.source_lock import (
     SourceLockError,
     fetch_sources,
     load_source_lock,
+    source_age_status,
     verify_sources,
 )
 
@@ -186,6 +187,155 @@ class SourceLockTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(SourceLockError, "exceeds locked size"):
                     fetch_sources(lock_path, root / "inputs")
+
+
+class RefreshPolicyTests(unittest.TestCase):
+    def _locked_source(self, root: Path, *, refresh_policy=None):
+        lock = {
+            "format": "opencepgeo-source-lock-v1",
+            "release": "fixture-v1",
+            "publication_gate": "blocked-test-only",
+            "sources": [
+                {
+                    "id": "fixture",
+                    "role": "test input",
+                    "required": True,
+                    "version": "1",
+                    "filename": "fixture.bin",
+                    "bytes": 1,
+                    "sha256": "0" * 64,
+                    "acquisition": "repository",
+                    "local_path": "fixture.bin",
+                    "retrieved_at": "2026-08-07T00:00:00Z",
+                    "attribution": "Test fixture",
+                    "license_status": "test-only",
+                    "terms_status": "test-only",
+                }
+            ],
+        }
+        if refresh_policy is not None:
+            lock["sources"][0]["refresh_policy"] = refresh_policy
+        lock_path = root / "lock.json"
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        return load_source_lock(lock_path).sources[0]
+
+    def test_accepts_valid_refresh_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._locked_source(
+                Path(directory),
+                refresh_policy={"refresh_interval_days": 30, "max_age_days": 45},
+            )
+            self.assertEqual(source.refresh_policy.refresh_interval_days, 30)
+            self.assertEqual(source.refresh_policy.max_age_days, 45)
+
+    def test_rejects_inconsistent_policy_windows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(SourceLockError, "max_age_days"):
+                self._locked_source(
+                    Path(directory),
+                    refresh_policy={"refresh_interval_days": 60, "max_age_days": 30},
+                )
+
+    def test_rejects_non_positive_or_extra_policy_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(SourceLockError, "between 1 and 36500"):
+                self._locked_source(
+                    Path(directory),
+                    refresh_policy={"refresh_interval_days": 0, "max_age_days": 30},
+                )
+            with self.assertRaisesRegex(SourceLockError, "exactly"):
+                self._locked_source(
+                    Path(directory),
+                    refresh_policy={
+                        "refresh_interval_days": 30,
+                        "max_age_days": 45,
+                        "ttl": 1,
+                    },
+                )
+
+    def test_age_status_classification(self):
+        from datetime import datetime, timezone
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._locked_source(
+                Path(directory),
+                refresh_policy={"refresh_interval_days": 30, "max_age_days": 45},
+            )
+            now = datetime(2026, 8, 14, tzinfo=timezone.utc)
+            self.assertEqual(source_age_status(source, now=now)["status"], "current")
+            now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+            self.assertEqual(source_age_status(source, now=now)["status"], "due")
+            now = datetime(2026, 10, 15, tzinfo=timezone.utc)
+            self.assertEqual(source_age_status(source, now=now)["status"], "stale")
+
+    def test_age_status_without_policy_never_ages(self):
+        from datetime import datetime, timezone
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._locked_source(Path(directory))
+            now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+            status = source_age_status(source, now=now)
+            self.assertEqual(status["status"], "no-policy")
+            self.assertIsNone(status["max_age_days"])
+
+    def test_freshness_cli_reports_and_exits_nonzero_on_stale(self):
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock_path = root / "lock.json"
+            lock = {
+                "format": "opencepgeo-source-lock-v1",
+                "release": "fixture-v1",
+                "publication_gate": "blocked-test-only",
+                "sources": [
+                    {
+                        "id": "fixture",
+                        "role": "test input",
+                        "required": True,
+                        "version": "1",
+                        "filename": "fixture.bin",
+                        "bytes": 1,
+                        "sha256": "0" * 64,
+                        "acquisition": "repository",
+                        "local_path": "fixture.bin",
+                        "retrieved_at": "2026-08-07T00:00:00Z",
+                        "attribution": "Test fixture",
+                        "license_status": "test-only",
+                        "terms_status": "test-only",
+                        "refresh_policy": {
+                            "refresh_interval_days": 30,
+                            "max_age_days": 45,
+                        },
+                    }
+                ],
+            }
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            environment = {
+                **__import__("os").environ,
+                "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+            }
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "opencepgeo.cli",
+                    "sources",
+                    "freshness",
+                    "--lock",
+                    str(lock_path),
+                    "--now",
+                    "2026-10-15T00:00:00Z",
+                ],
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 1)
+            document = json.loads(result.stdout)
+            self.assertEqual(document["summary"]["stale"], 1)
+            self.assertEqual(document["sources"][0]["status"], "stale")
 
 
 if __name__ == "__main__":

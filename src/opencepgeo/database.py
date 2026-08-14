@@ -326,6 +326,7 @@ _ROW_COLUMNS = (
 )
 LOOKUP_COLUMNS = _ROW_COLUMNS
 _PREFIX_EXACT_PRECISIONS = frozenset({"observed_cep", "osm_postcode"})
+_EXACT_PRECISIONS = frozenset({"observed_cep", "observed_cep_prefix"})
 _PREFIX_MIN_EVIDENCE = 3
 _PREFIX_MAX_EVIDENCE_RADIUS_KM = 10.0
 _PREFIX_MAX_MEMBERS = 1000
@@ -1783,8 +1784,16 @@ def _fill_normalized_geo(
     municipalities: dict[str, object],
     administrative: dict[str, object],
     counters: dict[str, int],
+    osm_estimator: CentroidEstimator | None = None,
 ) -> dict[str, object]:
     if row["geo"] is not None:
+        if (
+            osm_estimator is not None
+            and row["geo"]["precision"] == "municipality"
+            and (upgraded := _osm_postcode_upgrade(row, osm_estimator)) is not None
+        ):
+            counters["geo_upgraded_osm_postcode"] += 1
+            return upgraded
         counters["geo_inherited"] += 1
         return row
     ibge = str(row["ibge"])
@@ -1801,8 +1810,7 @@ def _fill_normalized_geo(
         if method == "ibge_municipality_reference"
         else "geo_filled_administrative"
     )
-    counters[counter] += 1
-    return {
+    filled = {
         **row,
         "geo": {
             "type": "Point",
@@ -1813,6 +1821,42 @@ def _fill_normalized_geo(
             "evidence_radius_km": reference.evidence_radius_km,
             "source": [reference.point.source],
             "evidence_digest": reference.evidence_digest,
+        },
+    }
+    if osm_estimator is not None and (
+        upgraded := _osm_postcode_upgrade(filled, osm_estimator)
+    ) is not None:
+        counters["geo_upgraded_osm_postcode"] += 1
+        return upgraded
+    counters[counter] += 1
+    return filled
+
+
+def _osm_postcode_upgrade(
+    row: dict[str, object], estimator: CentroidEstimator
+) -> dict[str, object] | None:
+    """Upgrade a municipality-precision row when gated OSM evidence agrees.
+
+    New OSM evidence must corroborate the row's asserted IBGE municipality the
+    same way the full build path gates it (containment distance, radius, and
+    outlier rejection inside ``CentroidEstimator``). Only municipality-tier
+    coordinates are ever upgraded; validated higher tiers and unresolved rows
+    pass through untouched. Returns ``None`` when the evidence does not qualify.
+    """
+    estimate = estimator.estimate(row["cep"], row["ibge"])
+    if estimate is None or estimate.precision != "osm_postcode":
+        return None
+    return {
+        **row,
+        "geo": {
+            "type": "Point",
+            "coordinates": [estimate.longitude, estimate.latitude],
+            "precision": "osm_postcode",
+            "method": estimate.method,
+            "evidence_count": estimate.evidence_count,
+            "evidence_radius_km": estimate.evidence_radius_km,
+            "source": estimate.sources,
+            "evidence_digest": estimate.evidence_digest,
         },
     }
 
@@ -2329,6 +2373,7 @@ def build_database_from_normalized(
     manifest_path: str | Path,
     force: bool = False,
     build_instant: datetime | None = None,
+    osm_upgrade: bool = False,
 ) -> dict[str, object]:
     normalized = Path(normalized_path)
     normalized_output = Path(normalized_output_path)
@@ -2732,7 +2777,7 @@ def build_database_from_normalized(
             or candidate_located != refresh_quality_document["located_rows"]
             or candidate_rows - candidate_located
             != refresh_quality_document["unresolved_rows"]
-            or set(candidate_precision) - _REFRESH_PRECISION_KEYS
+            or set(candidate_precision) - _REFRESH_PRECISION_KEYS - _EXACT_PRECISIONS
             or streamed_precision != refresh_quality_document["precision_counts"]
         ):
             raise ValueError("candidate geography counts disagree with refresh quality")
@@ -2771,6 +2816,68 @@ def build_database_from_normalized(
                 else 0.0
             ),
         )
+
+        # Gated OSM tier upgrade (PIN-222): with the candidate proven against
+        # its pinned evidence above, optionally upgrade municipality-precision
+        # rows whose CEP now has boundary-contained OSM evidence. The estimator
+        # uses the same locked inputs, containment gate, and outlier policy as
+        # the coordinate validator, so every upgraded point is reproducible
+        # from the same pinned evidence the validator itself recomputes from.
+        osm_upgrade_estimator = None
+        osm_upgrade_selection = None
+        if osm_upgrade:
+            upgrade_boundary_members = _locked_source(
+                lock, municipality_boundaries
+            ).metadata.get("members")
+            if not isinstance(upgrade_boundary_members, dict) or not (
+                upgrade_boundary_members
+            ):
+                raise ValueError(
+                    "locked municipality boundaries require member identities"
+                )
+            upgrade_observations = load_osm_observations(osm_observations)
+            upgrade_targets = {
+                str(row["cep"]): str(row["ibge"])
+                for row in _iter_normalized_rows(
+                    normalized, dataset_version, candidate_record
+                )
+            }
+            selection = select_municipality_observations(
+                municipality_boundaries,
+                upgrade_observations,
+                upgrade_targets,
+                expected_members=upgrade_boundary_members,
+            )
+            if len(selection.interior_target_municipality) + len(
+                selection.boundary_target_municipality
+            ) + len(selection.outside_target_municipality) + len(
+                selection.unknown_cep
+            ) != len(upgrade_observations):
+                raise ValueError(
+                    "OSM upgrade boundary selection counts are inconsistent"
+                )
+            osm_upgrade_selection = {
+                "method": "ibge-2024-municipality-polygon-containment-v1",
+                "input_observations": len(upgrade_observations),
+                "eligible_observations": len(selection.eligible),
+                "excluded_outside_target_municipality": len(
+                    selection.outside_target_municipality
+                ),
+                "unknown_cep": len(selection.unknown_cep),
+            }
+            osm_upgrade_estimator = CentroidEstimator(
+                (),
+                municipalities,
+                osm_observations=selection.eligible,
+                min_prefix_samples=enrichment.min_prefix_samples,
+                max_prefix_radius_km=enrichment.max_prefix_radius_km,
+                max_observed_radius_km=enrichment.max_observed_radius_km,
+                max_osm_radius_km=enrichment.max_osm_radius_km,
+                max_osm_municipality_distance_km=enrichment.max_osm_municipality_distance_km,
+                outlier_min_samples=enrichment.outlier_min_samples,
+                outlier_mad_multiplier=enrichment.outlier_mad_multiplier,
+                outlier_floor_km=enrichment.outlier_floor_km,
+            )
     except Exception:
         shutil.rmtree(staging_directory, ignore_errors=True)
         os.close(parent_descriptor)
@@ -2784,6 +2891,7 @@ def build_database_from_normalized(
         "geo_filled_municipality": 0,
         "geo_filled_administrative": 0,
         "geo_unresolved": 0,
+        "geo_upgraded_osm_postcode": 0,
     }
     connection: sqlite3.Connection | None = None
     try:
@@ -2830,7 +2938,11 @@ def build_database_from_normalized(
                     normalized, dataset_version, candidate_record
                 ):
                     final_row = _fill_normalized_geo(
-                        source_row, municipalities, administrative, counters
+                        source_row,
+                        municipalities,
+                        administrative,
+                        counters,
+                        osm_estimator=osm_upgrade_estimator,
                     )
                     payload = _canonical_json(final_row) + b"\n"
                     output_handle.write(payload)
@@ -2904,6 +3016,9 @@ def build_database_from_normalized(
             "unresolved",
         ):
             statistics[f"tier_{precision}"] = tier_counts.get(precision, 0)
+        statistics["tier_delta_municipality_to_osm_postcode"] = counters[
+            "geo_upgraded_osm_postcode"
+        ]
 
         enforce_build_quality(connection, quality_policy)
         connection.row_factory = sqlite3.Row
@@ -2981,7 +3096,12 @@ def build_database_from_normalized(
                         "gate_report": gate_report.as_dict(),
                     },
                     "geography_derivation": {
-                        "policy": "preserve-non-null-fill-null-from-pinned-ibge-v1",
+                        "policy": (
+                            "preserve-non-null-fill-null-from-pinned-ibge-v1"
+                            if not osm_upgrade
+                            else "preserve-non-null-fill-null-from-pinned-ibge-v1"
+                            "+gated-osm-postcode-upgrade-v1"
+                        ),
                         "candidate_located": candidate_located,
                         "candidate_unresolved": candidate_rows - candidate_located,
                         "inherited": counters["geo_inherited"],
@@ -2992,6 +3112,13 @@ def build_database_from_normalized(
                         "unresolved": counters["geo_unresolved"],
                         "nearby_eligible": False,
                         "coordinate_validation": coordinate_validation,
+                        "osm_upgrade": {
+                            "enabled": osm_upgrade,
+                            "upgraded_municipality_to_osm_postcode": counters[
+                                "geo_upgraded_osm_postcode"
+                            ],
+                            "boundary_selection": osm_upgrade_selection,
+                        },
                     },
                 },
             },

@@ -330,6 +330,18 @@ def _write_correios_snapshot(
     return manifest
 
 
+def _candidate_precision_counts(
+    rows: list[dict[str, object]],
+) -> dict[str, int]:
+    counts = {"municipality": 0, "osm_postcode": 0}
+    for row in rows:
+        geo = row["geo"]
+        precision = "unresolved" if geo is None else str(geo["precision"])
+        if precision in counts:
+            counts[precision] += 1
+    return counts
+
+
 def _refresh_document(
     normalized: Path,
     quality: Path,
@@ -438,9 +450,11 @@ def _write_fixture(
                 "current_input_stable_across_build": True,
                 "current_rows_retained": True,
             },
-            "located_rows": 1,
-            "unresolved_rows": len(fixture_rows) - 1,
-            "precision_counts": {"municipality": 1, "osm_postcode": 0},
+            "located_rows": sum(1 for row in fixture_rows if row["geo"] is not None),
+            "unresolved_rows": sum(
+                1 for row in fixture_rows if row["geo"] is None
+            ),
+            "precision_counts": _candidate_precision_counts(fixture_rows),
             "geography_action_counts": _geography_action_counts(len(fixture_rows)),
         },
     )
@@ -877,9 +891,11 @@ def _write_fixture(
                 "current_input_stable_across_build": True,
                 "current_rows_retained": True,
             },
-            "located_rows": 1,
-            "unresolved_rows": len(fixture_rows) - 1,
-            "precision_counts": {"municipality": 1, "osm_postcode": 0},
+            "located_rows": sum(1 for row in fixture_rows if row["geo"] is not None),
+            "unresolved_rows": sum(
+                1 for row in fixture_rows if row["geo"] is None
+            ),
+            "precision_counts": _candidate_precision_counts(fixture_rows),
             "geography_action_counts": _geography_action_counts(len(fixture_rows)),
         },
     )
@@ -2268,6 +2284,277 @@ class NormalizedBuildTests(unittest.TestCase):
                     normalized_output_path=root / "out.jsonl",
                     manifest_path=root / "out.manifest.json",
                 )
+
+
+class OsmUpgradeTests(unittest.TestCase):
+    def test_upgrade_disabled_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments = _write_fixture(root)
+            stats = build_database_from_normalized(
+                **arguments,
+                output_path=root / "out.sqlite",
+                normalized_output_path=root / "out.jsonl",
+                manifest_path=root / "out.manifest.json",
+            )
+            self.assertEqual(stats["geo_upgraded_osm_postcode"], 0)
+            self.assertEqual(stats["tier_osm_postcode"], 0)
+            self.assertEqual(stats["tier_municipality"], 3)
+            self.assertEqual(stats["tier_delta_municipality_to_osm_postcode"], 0)
+
+    def test_gated_upgrade_moves_municipality_to_osm_postcode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments = _write_fixture(root)
+            output = root / "out.sqlite"
+            stats = build_database_from_normalized(
+                **arguments,
+                output_path=output,
+                normalized_output_path=root / "out.jsonl",
+                manifest_path=root / "out.manifest.json",
+                osm_upgrade=True,
+            )
+            # Both fixture OSM CEPs (01001000 inherited municipality, 20010000
+            # filled municipality) sit inside their boundary polygons with the
+            # same coordinates as the municipality reference points.
+            self.assertEqual(stats["geo_upgraded_osm_postcode"], 2)
+            self.assertEqual(stats["tier_osm_postcode"], 2)
+            self.assertEqual(stats["tier_municipality"], 1)
+            self.assertEqual(stats["tier_delta_municipality_to_osm_postcode"], 2)
+            upgraded = lookup(output, "20010000")["geo"]
+            self.assertEqual(upgraded["precision"], "osm_postcode")
+            self.assertEqual(upgraded["method"], "robust_median_osm_postcode")
+            self.assertEqual(upgraded["source"], ["openstreetmap"])
+            document = json.loads(
+                (root / "out.manifest.json").read_text(encoding="utf-8")
+            )
+            derivation = document["inputs"]["normalized_refresh"][
+                "geography_derivation"
+            ]
+            self.assertIn("gated-osm-postcode-upgrade-v1", derivation["policy"])
+            self.assertEqual(
+                derivation["osm_upgrade"]["upgraded_municipality_to_osm_postcode"], 2
+            )
+            self.assertTrue(derivation["osm_upgrade"]["enabled"])
+
+    def test_upgrade_never_touches_validated_exact_tier(self):
+        from opencepgeo.database import _fill_normalized_geo
+        from opencepgeo.estimator import CentroidEstimator
+        from opencepgeo.model import Observation, Point
+
+        rows = _rows()
+        exact = {
+            **rows[0],
+            "geo": {
+                "type": "Point",
+                "coordinates": [-46.6333, -23.5505],
+                "precision": "observed_cep",
+                "method": "robust_median_first_party",
+                "evidence_count": 1,
+                "evidence_radius_km": 0.0,
+                "source": ["first-party"],
+                "evidence_digest": "sha256:" + "0" * 64,
+            },
+        }
+        municipality_row = {
+            **rows[1],
+            "geo": {
+                "type": "Point",
+                "coordinates": [-43.2057, -22.9111],
+                "precision": "municipality",
+                "method": "ibge_municipality_reference",
+                "evidence_count": 1,
+                "evidence_radius_km": 0.0,
+                "source": ["ibge"],
+                "evidence_digest": "sha256:" + "1" * 64,
+            },
+        }
+        estimator = CentroidEstimator(
+            (),
+            {
+                "3304557": Point(-22.9111, -43.2057, "ibge"),
+                "3550308": Point(-23.5505, -46.6333, "ibge"),
+            },
+            osm_observations=(
+                Observation(
+                    cep="01001000",
+                    ibge=None,
+                    point=Point(-23.5505, -46.6333, "openstreetmap:node/1"),
+                ),
+                Observation(
+                    cep="20010000",
+                    ibge=None,
+                    point=Point(-22.9111, -43.2057, "openstreetmap:node/2"),
+                ),
+            ),
+        )
+        counters = {
+            "geo_inherited": 0,
+            "geo_filled_municipality": 0,
+            "geo_filled_administrative": 0,
+            "geo_unresolved": 0,
+            "geo_upgraded_osm_postcode": 0,
+        }
+        # The observed_cep row is never moved, even though OSM evidence exists.
+        preserved = _fill_normalized_geo(
+            exact, {}, {}, counters, osm_estimator=estimator
+        )
+        self.assertEqual(preserved, exact)
+        self.assertEqual(counters["geo_inherited"], 1)
+        self.assertEqual(counters["geo_upgraded_osm_postcode"], 0)
+        # A municipality row with the same evidence upgrades instead.
+        upgraded = _fill_normalized_geo(
+            municipality_row, {}, {}, counters, osm_estimator=estimator
+        )
+        self.assertEqual(upgraded["geo"]["precision"], "osm_postcode")
+        self.assertEqual(upgraded["geo"]["method"], "robust_median_osm_postcode")
+        self.assertEqual(counters["geo_upgraded_osm_postcode"], 1)
+
+    def test_upgrade_rejects_osm_evidence_outside_target_municipality(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            arguments = _write_fixture(root)
+            osm = arguments["osm_observations_path"]
+            # Move the Rio OSM evidence far outside the Rio municipality
+            # polygon: the boundary containment gate must exclude it.
+            lines = osm.read_text(encoding="utf-8").splitlines()
+            rewritten = [lines[0]]
+            for line in lines[1:]:
+                if line.startswith("20010000,"):
+                    _, ibge, _latitude, _longitude, source = line.split(",")
+                    rewritten.append(
+                        ",".join(("20010000", ibge, "-30.0", "-60.0", source))
+                    )
+                else:
+                    rewritten.append(line)
+            osm.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+            manifest_path = osm.with_suffix(".manifest.json")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["artifact"]["bytes"] = osm.stat().st_size
+            manifest["artifact"]["sha256"] = _sha256(osm)
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True), encoding="utf-8"
+            )
+            # The inherited build manifest, release manifest, and current
+            # release contract must all record the same mutated OSM lineage.
+            osm_record = {
+                "artifact": {
+                    "filename": osm.name,
+                    "bytes": osm.stat().st_size,
+                    "sha256": _sha256(osm),
+                },
+                "manifest": {
+                    "filename": manifest_path.name,
+                    "bytes": manifest_path.stat().st_size,
+                    "sha256": _sha256(manifest_path),
+                },
+                "source": manifest.get("source"),
+                "statistics": manifest.get("statistics"),
+                "publication_gate": manifest.get("publication_gate"),
+            }
+            inherited_release = arguments["inherited_release_path"]
+            build_manifest_path = inherited_release / "build-manifest.json"
+            build_document = json.loads(
+                build_manifest_path.read_text(encoding="utf-8")
+            )
+            build_document["configuration"]["osm_observations"] = osm_record
+            _write_json(build_manifest_path, build_document)
+            release_manifest_path = inherited_release / "manifest.json"
+            release_document = json.loads(
+                release_manifest_path.read_text(encoding="utf-8")
+            )
+            release_document["files"]["build-manifest.json"] = {
+                "bytes": build_manifest_path.stat().st_size,
+                "sha256": _sha256(build_manifest_path),
+                "format": "opencepgeo-build-manifest-v2",
+            }
+            _write_json(release_manifest_path, release_document)
+            release_document = json.loads(
+                release_manifest_path.read_text(encoding="utf-8")
+            )
+            release_document["quality_attestation"]["build_manifest_sha256"] = (
+                _sha256(build_manifest_path)
+            )
+            _write_json(release_manifest_path, release_document)
+            contract_path = arguments["current_release_contract_path"]
+            contract_document = json.loads(contract_path.read_text(encoding="utf-8"))
+            contract_document["approved_release"]["files"]["build-manifest.json"] = {
+                "bytes": build_manifest_path.stat().st_size,
+                "sha256": _sha256(build_manifest_path),
+                "format": "opencepgeo-build-manifest-v2",
+            }
+            contract_document["approved_release"]["release_manifest_sha256"] = (
+                _sha256(release_manifest_path)
+            )
+            _write_json(contract_path, contract_document)
+            refresh_quality = arguments["refresh_quality_path"]
+            refresh_quality_document = json.loads(
+                refresh_quality.read_text(encoding="utf-8")
+            )
+            inherited_contract = {
+                "filename": contract_path.name,
+                "bytes": contract_path.stat().st_size,
+                "sha256": _sha256(contract_path),
+            }
+            inherited_identity = {
+                "filename": contract_path.name,
+                "format": "px-opencepgeo-import-contract-v1",
+                "bytes": contract_path.stat().st_size,
+                "sha256": _sha256(contract_path),
+            }
+            release_identity = {
+                "filename": release_manifest_path.name,
+                "format": "opencepgeo-release-manifest-v2",
+                "bytes": release_manifest_path.stat().st_size,
+                "sha256": _sha256(release_manifest_path),
+            }
+            build_identity = {
+                "filename": build_manifest_path.name,
+                "format": "opencepgeo-build-manifest-v2",
+                "bytes": build_manifest_path.stat().st_size,
+                "sha256": _sha256(build_manifest_path),
+            }
+            refresh_quality_document["inherited_base_release"]["contract"] = (
+                inherited_identity
+            )
+            refresh_quality_document["inherited_base_release"]["release_manifest"] = (
+                release_identity
+            )
+            refresh_quality_document["inherited_base_release"]["build_manifest"] = (
+                build_identity
+            )
+            _write_json(refresh_quality, refresh_quality_document)
+            refresh_manifest = arguments["refresh_manifest_path"]
+            refresh_document = json.loads(refresh_manifest.read_text(encoding="utf-8"))
+            refresh_document["inherited_base_release"]["contract"] = inherited_identity
+            refresh_document["inherited_base_release"]["release_manifest"] = (
+                release_identity
+            )
+            refresh_document["inherited_base_release"]["build_manifest"] = (
+                build_identity
+            )
+            refresh_document["inputs"]["current_release_contract"] = inherited_contract
+            refresh_document["artifacts"]["quality-report.json"] = {
+                "format": "opencepgeo-correios-refresh-quality-v1",
+                "bytes": refresh_quality.stat().st_size,
+                "sha256": _sha256(refresh_quality),
+            }
+            _write_json(refresh_manifest, refresh_document)
+            stats = build_database_from_normalized(
+                **arguments,
+                output_path=root / "out.sqlite",
+                normalized_output_path=root / "out.jsonl",
+                manifest_path=root / "out.manifest.json",
+                osm_upgrade=True,
+            )
+            self.assertEqual(stats["geo_upgraded_osm_postcode"], 1)
+            document = json.loads(
+                (root / "out.manifest.json").read_text(encoding="utf-8")
+            )
+            selection = document["inputs"]["normalized_refresh"][
+                "geography_derivation"
+            ]["osm_upgrade"]["boundary_selection"]
+            self.assertEqual(selection["excluded_outside_target_municipality"], 2)
 
 
 if __name__ == "__main__":

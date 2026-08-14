@@ -24,6 +24,10 @@
       "license_status": "repository-mit-database-rights-unclear",
       "terms_status": "blocks-public-source-and-derived-data-release",
       "corrections_source_id": "opencep-2.0.1-corrections",
+      "refresh_policy": {
+        "refresh_interval_days": 180,
+        "max_age_days": 365
+      },
       "notes": "The repository license does not explicitly license the released database or document its DNE extraction rights."
     },
     {
@@ -58,7 +62,11 @@
       "retrieved_on": "a7x.l",
       "attribution": "IBGE, Censo Demografico 2022: Localidades do Brasil",
       "license_status": "public-download-attribution-required-license-text-not-embedded",
-      "terms_status": "private-build-allowed-publication-requires-attribution-review"
+      "terms_status": "private-build-allowed-publication-requires-attribution-review",
+      "refresh_policy": {
+        "refresh_interval_days": 365,
+        "max_age_days": 730
+      }
     },
     {
       "id": "ibge-municipios-2024",
@@ -99,7 +107,11 @@
           "sha256": "b4966edef1fb93bb6a6e89789836cb85c603784ee3a0e654a8184d8cef5f3742"
         }
       },
-      "notes": "Required whenever checksum-locked OSM postcode evidence is selected; used only for independent point-in-target-municipality containment."
+      "notes": "Required whenever checksum-locked OSM postcode evidence is selected; used only for independent point-in-target-municipality containment.",
+      "refresh_policy": {
+        "refresh_interval_days": 365,
+        "max_age_days": 730
+      }
     },
     {
       "id": "first-party-observations-example",
@@ -135,6 +147,10 @@
       "license_url": "https://www.openstreetmap.org/copyright",
       "license_status": "odbl-1.0",
       "terms_status": "optional-publication-requires-odbl-compliance",
+      "refresh_policy": {
+        "refresh_interval_days": 30,
+        "max_age_days": 45
+      },
       "notes": "Use only with local tooling. Public Nominatim is prohibited as a bulk source."
     }
   ]
