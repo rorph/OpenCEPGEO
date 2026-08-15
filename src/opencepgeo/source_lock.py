@@ -8,12 +8,25 @@ import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 class SourceLockError(ValueError):
     """The source lock or a locked input failed validation."""
+
+
+@dataclass(frozen=True)
+class RefreshPolicy:
+    refresh_interval_days: int
+    max_age_days: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "refresh_interval_days": self.refresh_interval_days,
+            "max_age_days": self.max_age_days,
+        }
 
 
 @dataclass(frozen=True)
@@ -28,6 +41,7 @@ class LockedSource:
     acquisition: str
     url: str | None
     local_path: str | None
+    refresh_policy: RefreshPolicy | None
     metadata: dict[str, Any]
 
 
@@ -42,6 +56,93 @@ def _require_string(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise SourceLockError(f"{field} must be a non-empty string")
     return value
+
+
+def _validate_refresh_policy(value: object, field: str) -> RefreshPolicy | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {
+        "refresh_interval_days",
+        "max_age_days",
+    }:
+        raise SourceLockError(
+            f"{field} must contain exactly refresh_interval_days and max_age_days"
+        )
+    days: list[int] = []
+    for name in ("refresh_interval_days", "max_age_days"):
+        raw = value[name]
+        if not isinstance(raw, int) or isinstance(raw, bool) or raw < 1 or raw > 36500:
+            raise SourceLockError(
+                f"{field}.{name} must be an integer between 1 and 36500 days"
+            )
+        days.append(raw)
+    refresh_interval_days, max_age_days = days
+    if max_age_days < refresh_interval_days:
+        raise SourceLockError(
+            f"{field}.max_age_days must not be shorter than refresh_interval_days"
+        )
+    return RefreshPolicy(
+        refresh_interval_days=refresh_interval_days,
+        max_age_days=max_age_days,
+    )
+
+
+def parse_timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        raise SourceLockError(f"{field} must be an RFC 3339 UTC timestamp ending in Z")
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SourceLockError(f"{field} is not a valid timestamp: {exc}") from exc
+    if moment.tzinfo is None or moment.utcoffset() != timezone.utc.utcoffset(None):
+        raise SourceLockError(f"{field} must be expressed in UTC")
+    return moment
+
+
+def source_age_status(
+    source: LockedSource, now: datetime | None = None
+) -> dict[str, object]:
+    """Classify a locked source against its refresh policy.
+
+    Sources without a refresh_policy (repository-owned fixtures and the like)
+    never age. ``now`` defaults to the current UTC time.
+    """
+    moment = now or datetime.now(timezone.utc)
+    retrieved_at = parse_timestamp(
+        source.metadata.get("retrieved_at"), f"{source.source_id}.retrieved_at"
+    )
+    age_days = (moment - retrieved_at).total_seconds() / 86400.0
+    if age_days < 0:
+        raise SourceLockError(
+            f"{source.source_id}.retrieved_at is in the future relative to the check"
+        )
+    if source.refresh_policy is None:
+        return {
+            "id": source.source_id,
+            "status": "no-policy",
+            "age_days": round(age_days, 2),
+            "refresh_interval_days": None,
+            "max_age_days": None,
+            "next_refresh_days": None,
+        }
+    return {
+        "id": source.source_id,
+        "status": (
+            "stale"
+            if age_days > source.refresh_policy.max_age_days
+            else (
+                "due"
+                if age_days > source.refresh_policy.refresh_interval_days
+                else "current"
+            )
+        ),
+        "age_days": round(age_days, 2),
+        "refresh_interval_days": source.refresh_policy.refresh_interval_days,
+        "max_age_days": source.refresh_policy.max_age_days,
+        "next_refresh_days": round(
+            source.refresh_policy.refresh_interval_days - age_days, 2
+        ),
+    }
 
 
 def _validate_member_identities(value: object, field: str) -> None:
@@ -59,14 +160,20 @@ def _validate_member_identities(value: object, field: str) -> None:
             or "\\" in name
             or name.casefold() in casefolded_names
         ):
-            raise SourceLockError(f"{field} contains an unsafe or duplicate member name")
+            raise SourceLockError(
+                f"{field} contains an unsafe or duplicate member name"
+            )
         casefolded_names.add(name.casefold())
         if not isinstance(identity, dict) or set(identity) != {"bytes", "sha256"}:
             raise SourceLockError(
                 f"{member_field} must contain exactly bytes and sha256"
             )
         byte_size = identity.get("bytes")
-        if not isinstance(byte_size, int) or isinstance(byte_size, bool) or byte_size < 1:
+        if (
+            not isinstance(byte_size, int)
+            or isinstance(byte_size, bool)
+            or byte_size < 1
+        ):
             raise SourceLockError(f"{member_field}.bytes must be a positive integer")
         sha256 = identity.get("sha256")
         if (
@@ -86,7 +193,10 @@ def load_source_lock(path: str | Path) -> SourceLock:
     except (OSError, json.JSONDecodeError) as exc:
         raise SourceLockError(f"cannot read source lock {lock_path}: {exc}") from exc
 
-    if not isinstance(document, dict) or document.get("format") != "opencepgeo-source-lock-v1":
+    if (
+        not isinstance(document, dict)
+        or document.get("format") != "opencepgeo-source-lock-v1"
+    ):
         raise SourceLockError("unsupported or missing source lock format")
     release = _require_string(document.get("release"), "release")
     _require_string(document.get("publication_gate"), "publication_gate")
@@ -117,7 +227,9 @@ def load_source_lock(path: str | Path) -> SourceLock:
         if not isinstance(byte_size, int) or byte_size < 0:
             raise SourceLockError(f"{prefix}.bytes must be a non-negative integer")
         sha256 = _require_string(raw.get("sha256"), f"{prefix}.sha256")
-        if len(sha256) != 64 or any(character not in "0123456789abcdef" for character in sha256):
+        if len(sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in sha256
+        ):
             raise SourceLockError(f"{prefix}.sha256 must be lowercase hexadecimal")
 
         acquisition = _require_string(raw.get("acquisition"), f"{prefix}.acquisition")
@@ -128,6 +240,10 @@ def load_source_lock(path: str | Path) -> SourceLock:
             "terms_status",
         ):
             _require_string(raw.get(metadata_field), f"{prefix}.{metadata_field}")
+        parse_timestamp(raw.get("retrieved_at"), f"{prefix}.retrieved_at")
+        refresh_policy = _validate_refresh_policy(
+            raw.get("refresh_policy"), f"{prefix}.refresh_policy"
+        )
         _validate_member_identities(raw.get("members"), f"{prefix}.members")
         url = raw.get("url")
         local_path = raw.get("local_path")
@@ -136,15 +252,21 @@ def load_source_lock(path: str | Path) -> SourceLock:
             if urllib.parse.urlparse(url).scheme != "https":
                 raise SourceLockError(f"{prefix}.url must use HTTPS")
             if local_path is not None:
-                raise SourceLockError(f"{prefix}.local_path is invalid for HTTPS acquisition")
+                raise SourceLockError(
+                    f"{prefix}.local_path is invalid for HTTPS acquisition"
+                )
         elif acquisition == "repository":
             local_path = _require_string(local_path, f"{prefix}.local_path")
             if Path(local_path).is_absolute():
                 raise SourceLockError(f"{prefix}.local_path must be relative")
             if url is not None:
-                raise SourceLockError(f"{prefix}.url is invalid for repository acquisition")
+                raise SourceLockError(
+                    f"{prefix}.url is invalid for repository acquisition"
+                )
         else:
-            raise SourceLockError(f"{prefix}.acquisition must be 'https' or 'repository'")
+            raise SourceLockError(
+                f"{prefix}.acquisition must be 'https' or 'repository'"
+            )
 
         sources.append(
             LockedSource(
@@ -158,6 +280,7 @@ def load_source_lock(path: str | Path) -> SourceLock:
                 acquisition=acquisition,
                 url=url if isinstance(url, str) else None,
                 local_path=local_path if isinstance(local_path, str) else None,
+                refresh_policy=refresh_policy,
                 metadata=raw,
             )
         )
@@ -178,7 +301,9 @@ def _select_sources(
         if unknown:
             raise SourceLockError(f"unknown source id(s): {', '.join(unknown)}")
         return tuple(source for source in lock.sources if source.source_id in requested)
-    return tuple(source for source in lock.sources if source.required or include_optional)
+    return tuple(
+        source for source in lock.sources if source.required or include_optional
+    )
 
 
 def verify_file(path: str | Path, source: LockedSource) -> dict[str, object]:
@@ -231,7 +356,9 @@ def repository_source_path(lock: SourceLock, source: LockedSource) -> Path:
     repository_root = lock.path.parent.parent.resolve()
     candidate = (repository_root / (source.local_path or "")).resolve()
     if candidate != repository_root and repository_root not in candidate.parents:
-        raise SourceLockError(f"repository source escapes repository root: {source.source_id}")
+        raise SourceLockError(
+            f"repository source escapes repository root: {source.source_id}"
+        )
     return candidate
 
 
