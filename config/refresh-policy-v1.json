@@ -1,0 +1,86 @@
+{
+  "format": "opencepgeo-refresh-policy-v1",
+  "version": "refresh-policy-2026.2.1-v1",
+  "freshness": {
+    "required_timezone_semantics": "unspecified_by_source",
+    "naive_dnec_utc_offset_minutes": -180,
+    "maximum_capture_lag_days": {
+      "weekly": 45,
+      "catch-up": 730
+    },
+    "maximum_snapshot_age_days": {
+      "weekly": 14,
+      "catch-up": 800
+    }
+  },
+  "ordering": {
+    "dataset_version_natural_sort": true,
+    "require_both_timestamps_advance": true
+  },
+  "budgets": {
+    "metric_denominator": "inherited_record_count",
+    "profiles": {
+      "weekly": {
+        "added": {
+          "maximum_fraction": 0.02,
+          "maximum_absolute": 50000
+        },
+        "missing_from_source": {
+          "maximum_fraction": 0.02,
+          "maximum_absolute": 50000
+        },
+        "ibge_changed": {
+          "maximum_fraction": 0.005,
+          "maximum_absolute": 5000
+        },
+        "address_changed": {
+          "maximum_fraction": 0.05,
+          "maximum_absolute": 150000
+        },
+        "duplicates_dropped": {
+          "maximum_fraction": 0.005,
+          "maximum_absolute": 5000
+        },
+        "source_link_conflicts": {
+          "maximum_fraction": 0.0001,
+          "maximum_absolute": 25
+        }
+      },
+      "catch-up": {
+        "added": {
+          "maximum_fraction": 0.5,
+          "maximum_absolute": 1000000
+        },
+        "missing_from_source": {
+          "maximum_fraction": 0.05,
+          "maximum_absolute": 150000
+        },
+        "ibge_changed": {
+          "maximum_fraction": 0.02,
+          "maximum_absolute": 50000
+        },
+        "address_changed": {
+          "maximum_fraction": 0.25,
+          "maximum_absolute": 500000
+        },
+        "duplicates_dropped": {
+          "maximum_fraction": 0.01,
+          "maximum_absolute": 50000
+        },
+        "source_link_conflicts": {
+          "maximum_fraction": 0.0005,
+          "maximum_absolute": 100
+        }
+      }
+    }
+  },
+  "retention": {
+    "policy": "retain-until-expiry",
+    "never_delete_missing_on_single_crawl": true,
+    "minimum_expiry_horizon_days": 180,
+    "maximum_expired_retained_fraction": 0.0
+  },
+  "replay_prevention": {
+    "require_strictly_newer_publication_identity": true
+  }
+}

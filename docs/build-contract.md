@@ -62,6 +62,72 @@ report, including valid classification/action pairings. The emitted source
 lineage preserves every inherited RC2 source record and its OSM/correction
 configuration, then adds explicit Correios snapshot provenance.
 
+## Refresh policy (`config/refresh-policy-v1.json`)
+
+The builder enforces a versioned refresh policy
+(`opencepgeo-refresh-policy-v1`, loader in `src/opencepgeo/refresh_policy.py`)
+against the *verified* Correios snapshot bytes — never against the refresh
+manifest's self-assertions:
+
+- **Snapshot is required input and re-verified.** `--correios-snapshot` must be
+  a real directory whose basename equals the refresh manifest's claimed
+  `correios_snapshot.directory` and contain `manifest.json`, `addresses.jsonl`
+  and `raw-addresses.jsonl`. All three are snapshotted and their SHA-256/byte
+  sizes recomputed; `addresses.jsonl` is streamed to re-derive record counts,
+  strict CEP order, first/last CEP and the cep-type/validity/IBGE-resolution
+  maps; `raw-addresses.jsonl` is streamed to re-derive duplicate statistics.
+  Every derived value must equal both the snapshot's own manifest and the
+  refresh manifest claims. `correios_snapshot_hash_verified` therefore becomes
+  a claim the builder itself proves.
+- **Freshness.** `captured_at` must be real ISO-8601 with an explicit UTC
+  offset; the naive `dnec_published_at` is accepted only under the recorded
+  `unspecified_by_source` semantics and is interpreted at the documented fixed
+  −03:00 (Brazil has had no DST since 2019), normalised to UTC. Capture must
+  not precede publication; the capture lag and the snapshot age at build time
+  are bounded per profile (weekly: 45/14 days; catch-up: 730/800 days). The
+  age gate uses the build wall-clock but records only relative values, so
+  builds stay byte-identical for fixed inputs.
+- **Ordering and replay prevention.** The candidate `dataset_version` must
+  sort strictly greater than the inherited release's under natural ordering
+  (numeric tokens, and a plain release orders above its own `-rc` pre-releases:
+  `2026.2.1-rc10` > `…-rc9`, `2026.10.0` > `2026.9.0`, `2026.2.1` >
+  `2026.2.1-rc3`). When the inherited release was itself built from a Correios
+  snapshot (recorded in its build manifest), both `dnec_published_at` and
+  `captured_at` must strictly advance, and the snapshot's `addresses_sha256` /
+  `manifest_sha256` must differ — an identical publication identity is a
+  replay. The pre-Correios RC2 base records no snapshot; ordering then anchors
+  on dataset-version progression alone.
+- **Change budgets.** Six metrics — `added`, `missing_from_source`,
+  `ibge_changed`, `address_changed`, `duplicates_dropped` (the snapshot's own
+  duplicate count) and `source_link_conflicts` — are each bounded by
+  maximum-fraction-of-inherited-record-count and maximum-absolute under two
+  profiles. `weekly` (the default) bounds incremental drift; `catch-up`
+  (`--refresh-profile catch-up`) bounds authorised large jumps and is
+  calibrated so the real RC3 delta (+34% added, +9.5% address changes) passes
+  while exceeding every weekly cap. A breach fails the build naming the
+  metric, observed value and both thresholds, and is overridable only by an
+  explicit recorded reason (`--refresh-override-budget "<reason>"`, ≤512
+  bytes, stored with the breached metric names in the build manifest's
+  `refresh_policy.gate_report.override`). Freshness, ordering, replay and
+  hash-integrity breaches are never overridable.
+- **Retention and `valid_until`.** `valid_until` in the refresh diff must be a
+  real ISO date/datetime (naive values use the same fixed DNEC offset); a CEP
+  retained as `missing_from_source` whose expiry already passed before the
+  snapshot's capture date fails the build — the refresh tool must exclude
+  expired rows instead of retaining them. A single unproven crawl never
+  deletes: missing CEPs are retained (`retained_missing`), and the documented
+  expiry horizon (180 days) governs when the refresh tool may expire a row;
+  multi-cycle tracking lives with the weekly worker.
+- **Recording.** The build manifest's `inputs.normalized_refresh.refresh_policy`
+  block carries the policy version/SHA-256, the selected profile, the
+  recomputed snapshot identities and the full gate report (UTC-normalised
+  timestamps, lag/age, ordering booleans, per-metric budget observations,
+  retention summary, override if any). The SQLite `metadata` table stores
+  `dnec_published_at`, `captured_at` (UTC-normalised), `refresh_profile` and
+  the policy version/SHA-256, giving the service layer source-true dataset age
+  without another builder change.
+
+
 The inherited build-time normalized basename may differ from its packaged
 release basename; their bytes, SHA-256, and JSONL format must agree, while the
 packaged name is independently bound by the release manifest and import
