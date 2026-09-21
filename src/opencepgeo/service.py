@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +36,7 @@ _REQUEST_TIMEOUT_SECONDS = 5.0
 _MAX_CONCURRENT_REQUESTS = 64
 _MAX_DATASET_VERSION_BYTES = 128
 _MAX_PREFIX_RESPONSE_BYTES = 16 * 1024
+_AGE_SOURCE_ORDER = ("captured_at", "dnec_published_at", "built_at")
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,9 @@ class VerifiedDataset:
     located: int
     unresolved: int
     identity: FileIdentity
+    dnec_published_at: str | None
+    captured_at: str | None
+    built_at: str
 
     def ensure_unchanged(self) -> None:
         try:
@@ -143,6 +148,12 @@ class VerifiedDataset:
 
     def ready_response(self) -> dict[str, object]:
         self.ensure_unchanged()
+        age_seconds, age_source = _dataset_age(
+            self.dnec_published_at,
+            self.captured_at,
+            self.built_at,
+            _utc_now(),
+        )
         return {
             "status": "ready",
             "dataset": {
@@ -154,6 +165,13 @@ class VerifiedDataset:
                     "located": self.located,
                     "unresolved": self.unresolved,
                 },
+                "freshness": {
+                    "dnec_published_at": self.dnec_published_at,
+                    "captured_at": self.captured_at,
+                    "built_at": self.built_at,
+                    "age_seconds": age_seconds,
+                    "age_source": age_source,
+                },
             },
         }
 
@@ -162,6 +180,71 @@ class DatasetUnavailable(RuntimeError):
     def __init__(self, problem: DatasetProblem):
         super().__init__(problem.detail or problem.message)
         self.problem = problem
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _format_utc(value: datetime) -> str:
+    return (
+        value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+
+
+def _parse_utc_timestamp(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return _format_utc(parsed)
+
+
+def _artifact_mtime(identity: FileIdentity) -> str:
+    return _format_utc(
+        datetime.fromtimestamp(identity.modified_ns / 1_000_000_000, UTC)
+    )
+
+
+def _freshness_from_metadata(
+    metadata: dict[str, str], identity: FileIdentity
+) -> tuple[str | None, str | None, str]:
+    return (
+        _parse_utc_timestamp(metadata.get("dnec_published_at")),
+        _parse_utc_timestamp(metadata.get("captured_at")),
+        _parse_utc_timestamp(metadata.get("built_at")) or _artifact_mtime(identity),
+    )
+
+
+def _dataset_age(
+    dnec_published_at: str | None,
+    captured_at: str | None,
+    built_at: str,
+    now: datetime,
+) -> tuple[int, str]:
+    stamps = {
+        "captured_at": captured_at,
+        "dnec_published_at": dnec_published_at,
+        "built_at": built_at,
+    }
+    moment = now.astimezone(UTC)
+    for source in _AGE_SOURCE_ORDER:
+        formatted = stamps[source]
+        parsed = _parse_utc_timestamp(formatted)
+        if parsed is None:
+            continue
+        origin = datetime.fromisoformat(parsed[:-1] + "+00:00")
+        return max(0, int((moment - origin).total_seconds())), source
+    raise RuntimeError("built_at is required for dataset age")
 
 
 def _sha256(path: Path) -> str:
@@ -363,6 +446,9 @@ def verify_dataset(config: ServiceConfig) -> VerifiedDataset:
             )
         ) from exc
 
+    dnec_published_at, captured_at, built_at = _freshness_from_metadata(
+        metadata, identity
+    )
     return VerifiedDataset(
         path=path,
         sha256=actual_sha256,
@@ -372,6 +458,9 @@ def verify_dataset(config: ServiceConfig) -> VerifiedDataset:
         located=located,
         unresolved=unresolved,
         identity=identity,
+        dnec_published_at=dnec_published_at,
+        captured_at=captured_at,
+        built_at=built_at,
     )
 
 
