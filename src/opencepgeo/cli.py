@@ -7,6 +7,7 @@ import sys
 from datetime import timezone
 from pathlib import Path
 
+from .cnefe import overlay_cnefe_candidate
 from .database import build_database, build_database_from_normalized, lookup
 from .osm import PBFError, extract_postcode_nodes
 from .quality import (
@@ -114,6 +115,21 @@ def _parser() -> argparse.ArgumentParser:
             "evidence corroborates the asserted municipality"
         ),
     )
+
+    cnefe = commands.add_parser(
+        "overlay-cnefe",
+        help="upgrade coarser coordinates from a pinned CNEFE candidate sqlite",
+    )
+    cnefe.add_argument("--inherited", required=True, help="inherited release sqlite")
+    cnefe.add_argument(
+        "--cnefe",
+        required=True,
+        help="pinned CNEFE candidate sqlite (accepted observed_cep rows)",
+    )
+    cnefe.add_argument("--output", required=True, help="immutable candidate sqlite")
+    cnefe.add_argument("--manifest", required=True)
+    cnefe.add_argument("--dataset-version", required=True)
+    cnefe.add_argument("--force", action="store_true")
 
     query = commands.add_parser("lookup", help="look up one CEP in a local artifact")
     query.add_argument("--database", required=True)
@@ -354,6 +370,22 @@ def main(argv: list[str] | None = None) -> int:
                 osm_upgrade=args.osm_upgrade,
             )
         except (OSError, RuntimeError, sqlite3.DatabaseError, ValueError) as exc:
+            print(json.dumps({"error": str(exc)}), file=sys.stderr)
+            return 2
+        print(json.dumps(stats, sort_keys=True))
+        return 0
+
+    if args.command == "overlay-cnefe":
+        try:
+            stats = overlay_cnefe_candidate(
+                inherited_path=Path(args.inherited),
+                cnefe_path=Path(args.cnefe),
+                output_path=Path(args.output),
+                manifest_path=Path(args.manifest),
+                dataset_version=args.dataset_version,
+                force=args.force,
+            )
+        except (FileExistsError, OSError, sqlite3.DatabaseError, ValueError) as exc:
             print(json.dumps({"error": str(exc)}), file=sys.stderr)
             return 2
         print(json.dumps(stats, sort_keys=True))
