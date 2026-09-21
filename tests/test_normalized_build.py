@@ -910,7 +910,7 @@ class NormalizedBuildTests(unittest.TestCase):
             ["Correios", "IBGE", "OpenCEP", "OpenStreetMap"],
         )
 
-    def test_builds_v4_sqlite_without_reestimating_geography(self):
+    def test_builds_v4_sqlite_preserving_only_evidence_backed_geography(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             arguments = _write_fixture(root)
@@ -979,6 +979,286 @@ class NormalizedBuildTests(unittest.TestCase):
             self.assertIn("opencep", document["inputs"])
             self.assertIsNotNone(document["configuration"]["opencep_corrections"])
             self.assertIsNotNone(document["configuration"]["osm_boundary_selection"])
+            # The stored geo for 01001000 is preserved byte-identically, but only
+            # because it is proven against the inherited release; the gate records
+            # that classification and finds nothing moved off its evidence.
+            validation = document["inputs"]["normalized_refresh"][
+                "geography_derivation"
+            ]["coordinate_validation"]
+            self.assertEqual(
+                validation["policy"],
+                "preserve-or-reproduce-from-pinned-ibge-osm-v1",
+            )
+            self.assertEqual(validation["non_null_candidate_rows"], 1)
+            self.assertEqual(validation["preserved_from_inherited"], 1)
+            self.assertEqual(validation["reproduced_from_pinned_evidence"], 0)
+            self.assertEqual(validation["suspicious_changes"], 0)
+            self.assertEqual(validation["displacement_km"]["count"], 0)
+            self.assertEqual(validation["osm_polygon"]["checked"], 0)
+
+    def test_rejects_candidate_coordinate_moved_off_pinned_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            moved = _rows()
+            # Move 01001000 off both the inherited release point and every pinned
+            # IBGE/OSM reference while keeping the geo object syntactically valid.
+            moved[0] = {
+                **moved[0],
+                "geo": {
+                    **moved[0]["geo"],
+                    "coordinates": [-50.0, -15.0],
+                },
+            }
+            arguments = _write_fixture(root, rows=moved)
+            with self.assertRaises(ValueError) as caught:
+                build_database_from_normalized(
+                    **arguments,
+                    output_path=root / "opencepgeo.sqlite",
+                    normalized_output_path=root / "opencepgeo-final.jsonl",
+                    manifest_path=root / "opencepgeo.manifest.json",
+                )
+            self.assertIn("reproduced from the pinned", str(caught.exception))
+            # The build must fail closed: no artifacts promoted.
+            self.assertFalse((root / "opencepgeo.sqlite").exists())
+
+    def test_coordinate_evidence_reproduces_osm_and_rejects_tampering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ibge = root / "ibge.gpkg"
+            make_ibge_gpkg(ibge)
+            osm = root / "osm.csv"
+            osm.write_text(
+                "cep,ibge,latitude,longitude,source\n"
+                "01001001,,-23.5505,-46.6333,openstreetmap:node/1\n"
+                "01001001,,-23.5510,-46.6335,openstreetmap:node/2\n",
+                encoding="utf-8",
+            )
+            boundaries = root / "boundaries.zip"
+            write_municipality_boundaries(
+                boundaries,
+                [
+                    (
+                        "3550308",
+                        [
+                            (-47.0, -24.0),
+                            (-46.0, -24.0),
+                            (-46.0, -23.0),
+                            (-47.0, -23.0),
+                        ],
+                    )
+                ],
+            )
+            repository = Path(__file__).resolve().parents[1]
+            enrichment = database_module.load_enrichment_config(
+                repository / "config/enrichment-v1.json"
+            )[0]
+            municipalities = database_module.load_ibge_municipality_references(ibge)
+            estimator = database_module._coordinate_evidence_estimator(
+                municipalities, osm, enrichment
+            )
+            estimate = estimator.estimate("01001001", "3550308")
+            self.assertEqual(estimate.precision, "osm_postcode")
+            osm_geo = estimate.as_geojson()
+
+            def _row(geo: dict[str, object], version: str) -> dict[str, object]:
+                return {
+                    "cep": "01001001",
+                    "prefix": "01001",
+                    "street": "Rua Fixture",
+                    "complement": None,
+                    "unit": None,
+                    "neighborhood": None,
+                    "city": "São Paulo",
+                    "uf": "SP",
+                    "state": "São Paulo",
+                    "region": "Sudeste",
+                    "ibge": "3550308",
+                    "dataset_version": version,
+                    "geo": geo,
+                }
+
+            inherited_geo = {
+                "type": "Point",
+                "coordinates": [-46.6333, -23.5505],
+                "precision": "municipality",
+                "method": "ibge_city_reference_with_locality_dispersion",
+                "evidence_count": 1,
+                "evidence_radius_km": 0.0,
+                "source": ["ibge"],
+                "evidence_digest": "sha256:" + "0" * 64,
+            }
+            inherited = root / "inherited.jsonl"
+            inherited.write_bytes(_canonical_row(_row(inherited_geo, "inherited-v1")))
+            inherited_record = {
+                "bytes": inherited.stat().st_size,
+                "sha256": _sha256(inherited),
+            }
+
+            def _validate(candidate_geo: dict[str, object]) -> dict[str, object]:
+                candidate = root / "candidate.jsonl"
+                candidate.write_bytes(
+                    _canonical_row(_row(candidate_geo, "candidate-v1"))
+                )
+                return database_module._validate_candidate_geography_evidence(
+                    candidate_path=candidate,
+                    candidate_record={
+                        "bytes": candidate.stat().st_size,
+                        "sha256": _sha256(candidate),
+                    },
+                    candidate_dataset_version="candidate-v1",
+                    inherited_path=inherited,
+                    inherited_record=inherited_record,
+                    inherited_dataset_version="inherited-v1",
+                    osm_observations_path=osm,
+                    municipality_boundaries_path=boundaries,
+                    boundary_members=None,
+                    municipalities=municipalities,
+                    administrative={},
+                    enrichment=enrichment,
+                    max_outside_polygon_fraction=0.0,
+                )
+
+            stats = _validate(osm_geo)
+            self.assertEqual(stats["non_null_candidate_rows"], 1)
+            self.assertEqual(stats["preserved_from_inherited"], 0)
+            self.assertEqual(stats["reproduced_from_pinned_evidence"], 1)
+            self.assertEqual(stats["reproduced_changed_cep"], 1)
+            self.assertEqual(stats["suspicious_changes"], 0)
+            self.assertEqual(stats["displacement_km"]["count"], 1)
+            self.assertGreater(stats["displacement_km"]["max_km"], 0.0)
+            polygon = stats["osm_polygon"]
+            self.assertEqual(polygon["checked"], 1)
+            self.assertEqual(polygon["interior"] + polygon["boundary"], 1)
+            self.assertEqual(polygon["outside"], 0)
+
+            moved = {**osm_geo, "coordinates": [-40.0, -10.0]}
+            with self.assertRaises(ValueError) as caught:
+                _validate(moved)
+            self.assertIn("reproduced from the pinned", str(caught.exception))
+
+    def test_coordinate_evidence_accepts_municipality_point_with_osm_nodes(self):
+        # Regression: a candidate may legitimately keep a coarse municipality
+        # point for a CEP that also has OSM nodes. Validation must dispatch on the
+        # stored precision (municipality -> pinned IBGE reference) rather than
+        # re-deciding the tier via the estimator, which would upgrade the CEP to
+        # osm_postcode and spuriously reject the point.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ibge = root / "ibge.gpkg"
+            make_ibge_gpkg(ibge)  # 3550308 city reference at (-46.6333, -23.5505)
+            osm = root / "osm.csv"
+            osm.write_text(
+                "cep,ibge,latitude,longitude,source\n"
+                "01001002,,-23.5505,-46.6333,openstreetmap:node/1\n"
+                "01001002,,-23.5510,-46.6335,openstreetmap:node/2\n",
+                encoding="utf-8",
+            )
+            boundaries = root / "boundaries.zip"
+            write_municipality_boundaries(
+                boundaries,
+                [
+                    (
+                        "3550308",
+                        [
+                            (-47.0, -24.0),
+                            (-46.0, -24.0),
+                            (-46.0, -23.0),
+                            (-47.0, -23.0),
+                        ],
+                    )
+                ],
+            )
+            repository = Path(__file__).resolve().parents[1]
+            enrichment = database_module.load_enrichment_config(
+                repository / "config/enrichment-v1.json"
+            )[0]
+            municipalities = database_module.load_ibge_municipality_references(ibge)
+            reference = municipalities["3550308"].point
+            municipality_geo = {
+                "type": "Point",
+                "coordinates": [reference.longitude, reference.latitude],
+                "precision": "municipality",
+                "method": "ibge_city_reference_with_locality_dispersion",
+                "evidence_count": 1,
+                "evidence_radius_km": 0.0,
+                "source": ["ibge"],
+                "evidence_digest": "sha256:" + "0" * 64,
+            }
+            row = {
+                "cep": "01001002",
+                "prefix": "01001",
+                "street": None,
+                "complement": None,
+                "unit": None,
+                "neighborhood": None,
+                "city": "São Paulo",
+                "uf": "SP",
+                "state": "São Paulo",
+                "region": "Sudeste",
+                "ibge": "3550308",
+                "dataset_version": "candidate-v1",
+                "geo": municipality_geo,
+            }
+            candidate = root / "candidate.jsonl"
+            candidate.write_bytes(_canonical_row(row))
+            # inherited release: an earlier, unrelated CEP -> 01001002 is new.
+            inherited_row = {**row, "cep": "01000000", "prefix": "01000", "geo": None}
+            inherited = root / "inherited.jsonl"
+            inherited.write_bytes(
+                _canonical_row({**inherited_row, "dataset_version": "inherited-v1"})
+            )
+            stats = database_module._validate_candidate_geography_evidence(
+                candidate_path=candidate,
+                candidate_record={
+                    "bytes": candidate.stat().st_size,
+                    "sha256": _sha256(candidate),
+                },
+                candidate_dataset_version="candidate-v1",
+                inherited_path=inherited,
+                inherited_record={
+                    "bytes": inherited.stat().st_size,
+                    "sha256": _sha256(inherited),
+                },
+                inherited_dataset_version="inherited-v1",
+                osm_observations_path=osm,
+                municipality_boundaries_path=boundaries,
+                boundary_members=None,
+                municipalities=municipalities,
+                administrative={},
+                enrichment=enrichment,
+                max_outside_polygon_fraction=0.0,
+            )
+            self.assertEqual(stats["suspicious_changes"], 0)
+            self.assertEqual(stats["reproduced_from_pinned_evidence"], 1)
+            self.assertEqual(stats["reproduced_new_cep"], 1)
+            self.assertEqual(stats["osm_polygon"]["checked"], 0)
+
+            # Moving that municipality point off its IBGE reference is rejected.
+            moved = {**row, "geo": {**municipality_geo, "coordinates": [-50.0, -15.0]}}
+            moved_path = root / "moved.jsonl"
+            moved_path.write_bytes(_canonical_row(moved))
+            with self.assertRaises(ValueError):
+                database_module._validate_candidate_geography_evidence(
+                    candidate_path=moved_path,
+                    candidate_record={
+                        "bytes": moved_path.stat().st_size,
+                        "sha256": _sha256(moved_path),
+                    },
+                    candidate_dataset_version="candidate-v1",
+                    inherited_path=inherited,
+                    inherited_record={
+                        "bytes": inherited.stat().st_size,
+                        "sha256": _sha256(inherited),
+                    },
+                    inherited_dataset_version="inherited-v1",
+                    osm_observations_path=osm,
+                    municipality_boundaries_path=boundaries,
+                    boundary_members=None,
+                    municipalities=municipalities,
+                    administrative={},
+                    enrichment=enrichment,
+                    max_outside_polygon_fraction=0.0,
+                )
 
     def test_snapshots_all_consumed_inputs_before_downstream_use(self):
         with tempfile.TemporaryDirectory() as directory:

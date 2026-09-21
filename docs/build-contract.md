@@ -25,9 +25,18 @@ basename, size, SHA-256, row version, and count are bound by an
 `opencepgeo-correios-refresh-manifest-v1` in the offline-candidate state. Lines
 are bounded, UTF-8 JSON is required to be compact/canonical, CEPs must be
 strictly increasing and unique, and the complete v4 row/geo contract is
-validated before use. Non-null geography is inserted unchanged. A null point
-may only become a coarse, nearby-ineligible `municipality` point derived from
-the pinned IBGE Localidades input. The ordinary municipality reference and the
+validated before use. Non-null geography is accepted only when it is
+byte-identical to the inherited release (already proven when that release built)
+or reproduced exactly by recomputing from the pinned IBGE/OSM evidence for its
+precision tier; because those inputs are hash-locked to the inherited lineage, a
+point that is neither preserved nor reproduced has been moved off its evidence
+and fails the build. `osm_postcode` points are additionally checked for
+municipality-polygon containment, gated on the fraction the quality policy
+tolerates, and the build manifest's `geography_derivation.coordinate_validation`
+block records the per-refresh preserved/reproduced counts, the
+inherited-to-candidate displacement distribution, and the suspicious-change
+count. A null point may only become a coarse, nearby-ineligible `municipality`
+point derived from the pinned IBGE Localidades input. The ordinary municipality reference and the
 narrow Fernando de Noronha administrative-locality reference have distinct
 methods, sources, evidence counts, radii, and digests. The candidate SQLite
 emitted by the refresh tool is deliberately not an input.
