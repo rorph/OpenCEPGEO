@@ -4,6 +4,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from datetime import timezone
 from pathlib import Path
 
 from .database import build_database, build_database_from_normalized, lookup
@@ -14,7 +15,13 @@ from .quality import (
     write_quality_report,
 )
 from .release import package_release, verify_release
-from .source_lock import SourceLockError, fetch_sources, verify_sources
+from .source_lock import (
+    SourceLockError,
+    fetch_sources,
+    load_source_lock,
+    source_age_status,
+    verify_sources,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -99,6 +106,14 @@ def _parser() -> argparse.ArgumentParser:
     normalized_build.add_argument("--output", required=True)
     normalized_build.add_argument("--manifest", required=True)
     normalized_build.add_argument("--force", action="store_true")
+    normalized_build.add_argument(
+        "--osm-upgrade",
+        action="store_true",
+        help=(
+            "upgrade municipality-precision CEPs to osm_postcode when gated OSM "
+            "evidence corroborates the asserted municipality"
+        ),
+    )
 
     query = commands.add_parser("lookup", help="look up one CEP in a local artifact")
     query.add_argument("--database", required=True)
@@ -116,6 +131,16 @@ def _parser() -> argparse.ArgumentParser:
         source.add_argument("--include-optional", action="store_true")
         if command == "fetch":
             source.add_argument("--timeout", type=float, default=60.0)
+    freshness = source_commands.add_parser(
+        "freshness",
+        help="report lock-source ages against their refresh policies",
+    )
+    freshness.add_argument("--lock", default="sources/lock.json")
+    freshness.add_argument(
+        "--now",
+        help="override the reference instant (RFC 3339 UTC ending in Z)",
+    )
+    freshness.add_argument("--source", action="append", dest="source_ids")
 
     osm = commands.add_parser("osm", help="extract local OSM postcode evidence")
     osm_commands = osm.add_subparsers(dest="osm_command", required=True)
@@ -173,6 +198,42 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "sources":
         try:
+            if args.source_command == "freshness":
+                from datetime import datetime
+
+                lock = load_source_lock(args.lock)
+                if args.now is not None:
+                    from .source_lock import parse_timestamp
+
+                    now = parse_timestamp(args.now, "--now")
+                else:
+                    now = datetime.now(timezone.utc)
+                selected = lock.sources
+                if args.source_ids:
+                    requested = set(args.source_ids)
+                    unknown = sorted(
+                        requested - {source.source_id for source in lock.sources}
+                    )
+                    if unknown:
+                        raise SourceLockError(
+                            f"unknown source id(s): {', '.join(unknown)}"
+                        )
+                    selected = [
+                        source
+                        for source in lock.sources
+                        if source.source_id in requested
+                    ]
+                statuses = [source_age_status(source, now=now) for source in selected]
+                summary = {
+                    status: sum(1 for entry in statuses if entry["status"] == status)
+                    for status in ("current", "due", "stale", "no-policy")
+                }
+                print(
+                    json.dumps(
+                        {"sources": statuses, "summary": summary}, sort_keys=True
+                    )
+                )
+                return 0 if not summary["stale"] else 1
             if args.source_command == "fetch":
                 results = fetch_sources(
                     args.lock,
@@ -290,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=args.output,
                 manifest_path=args.manifest,
                 force=args.force,
+                osm_upgrade=args.osm_upgrade,
             )
         except (OSError, RuntimeError, sqlite3.DatabaseError, ValueError) as exc:
             print(json.dumps({"error": str(exc)}), file=sys.stderr)

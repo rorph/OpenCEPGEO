@@ -24,6 +24,10 @@
       "license_status": "repository-mit-database-rights-unclear",
       "terms_status": "blocks-public-source-and-derived-data-release",
       "corrections_source_id": "opencep-2.0.1-corrections",
+      "refresh_policy": {
+        "refresh_interval_days": 180,
+        "max_age_days": 365
+      },
       "notes": "The repository license does not explicitly license the released database or document its DNE extraction rights."
     },
     {
@@ -58,7 +62,11 @@
       "retrieved_on": "a7x.l",
       "attribution": "IBGE, Censo Demografico 2022: Localidades do Brasil",
       "license_status": "public-download-attribution-required-license-text-not-embedded",
-      "terms_status": "private-build-allowed-publication-requires-attribution-review"
+      "terms_status": "private-build-allowed-publication-requires-attribution-review",
+      "refresh_policy": {
+        "refresh_interval_days": 365,
+        "max_age_days": 730
+      }
     },
     {
       "id": "ibge-municipios-2024",
@@ -99,7 +107,11 @@
           "sha256": "b4966edef1fb93bb6a6e89789836cb85c603784ee3a0e654a8184d8cef5f3742"
         }
       },
-      "notes": "Required whenever checksum-locked OSM postcode evidence is selected; used only for independent point-in-target-municipality containment."
+      "notes": "Required whenever checksum-locked OSM postcode evidence is selected; used only for independent point-in-target-municipality containment.",
+      "refresh_policy": {
+        "refresh_interval_days": 365,
+        "max_age_days": 730
+      }
     },
     {
       "id": "first-party-observations-example",
@@ -118,23 +130,27 @@
       "notes": "A production observation file must receive its own immutable lock entry and collection-rights review."
     },
     {
-      "id": "geofabrik-brazil-260806",
+      "id": "geofabrik-brazil-260813",
       "role": "Optional pinned local OSM enrichment extract",
       "required": false,
-      "version": "brazil-260806",
-      "filename": "geofabrik-brazil-260806.osm.pbf",
-      "bytes": 2068474612,
-      "sha256": "27fff6bf35856655cd6979dba64e3a9b67b3e7594d3c66a6d56fa401fde4050b",
+      "version": "brazil-260813",
+      "filename": "geofabrik-brazil-260813.osm.pbf",
+      "bytes": 2071026968,
+      "sha256": "2a1b9ff380362c9daba271a13e31b3327ddf9e244f290fdd9e9912d107362b76",
       "acquisition": "https",
-      "url": "https://download.geofabrik.de/south-america/brazil-260806.osm.pbf",
+      "url": "https://download.geofabrik.de/south-america/brazil-260813.osm.pbf",
       "product_url": "https://download.geofabrik.de/south-america/brazil.html",
-      "upstream_modified_at": "2026-08-06T22:50:55Z",
-      "retrieved_at": "2026-08-07T00:35:39Z",
+      "upstream_modified_at": "2026-08-13T22:51:10Z",
+      "retrieved_at": "2026-08-14T22:46:27Z",
       "retrieved_on": "a7x.l",
       "attribution": "OpenStreetMap contributors; extract by Geofabrik GmbH",
       "license_url": "https://www.openstreetmap.org/copyright",
       "license_status": "odbl-1.0",
       "terms_status": "optional-publication-requires-odbl-compliance",
+      "refresh_policy": {
+        "refresh_interval_days": 30,
+        "max_age_days": 45
+      },
       "notes": "Use only with local tooling. Public Nominatim is prohibited as a bulk source."
     }
   ]
